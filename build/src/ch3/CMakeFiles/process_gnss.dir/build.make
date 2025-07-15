@@ -44,10 +44,10 @@ cmake_force:
 SHELL = /bin/sh
 
 # The CMake executable.
-CMAKE_COMMAND = /usr/local/bin/cmake
+CMAKE_COMMAND = /opt/homebrew/bin/cmake
 
 # The command to remove a file.
-RM = /usr/local/bin/cmake -E rm -f
+RM = /opt/homebrew/bin/cmake -E rm -f
 
 # Escaping for special characters.
 EQUALS = =
@@ -160,7 +160,9 @@ process_gnss_EXTERNAL_OBJECTS =
 /Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: src/ch3/CMakeFiles/process_gnss.dir/__/__/thirdparty/utm_convert/tranmerc.cc.o
 /Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: src/ch3/CMakeFiles/process_gnss.dir/build.make
 /Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: src/common/libminimal_slam_common.a
-/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: /usr/local/lib/libgflags.2.2.2.dylib
+/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: /opt/homebrew/lib/libglog.dylib
+/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: /opt/homebrew/lib/libgflags.dylib
+/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: /opt/homebrew/lib/libgflags.2.2.2.dylib
 /Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss: src/ch3/CMakeFiles/process_gnss.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX executable /Users/cjj/work/GNSS_INS/slam/gnss_imu_time/bin/process_gnss"
 	cd /Users/cjj/work/GNSS_INS/slam/gnss_imu_time/build/src/ch3 && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/process_gnss.dir/link.txt --verbose=$(VERBOSE)

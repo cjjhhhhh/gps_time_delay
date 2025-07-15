@@ -4,7 +4,9 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -DGFLAGS_IS_A_DLL=0
 
-CXX_INCLUDES = -I/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/src -I/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/thirdparty -I/usr/local/include/eigen3 -I/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/src/common
+CXX_INCLUDES = -I/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/src -I/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/thirdparty -I/opt/homebrew/include/eigen3 -I/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/src/common -isystem /opt/homebrew/include
 
-CXX_FLAGS = -O2 -g -std=gnu++17
+CXX_FLAGSarm64 = -O2 -g -std=gnu++17 -arch arm64
+
+CXX_FLAGS = -O2 -g -std=gnu++17 -arch arm64
 

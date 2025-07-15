@@ -16,6 +16,12 @@ find_package(gflags REQUIRED)
 # 可选依赖（如果安装了就用，没有就跳过）
 find_package(yaml-cpp QUIET)
 
+# 添加库搜索路径
+link_directories(/opt/homebrew/lib)
+
+# 设置库路径变量
+set(CMAKE_LIBRARY_PATH "/opt/homebrew/lib;${CMAKE_LIBRARY_PATH}")
+
 # 包含目录
 include_directories(${PROJECT_SOURCE_DIR}/src)
 include_directories(${PROJECT_SOURCE_DIR}/thirdparty)

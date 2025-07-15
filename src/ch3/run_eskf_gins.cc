@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
     //     ui = std::make_shared<sad::ui::PangolinWindow>();
     //     ui->Init();
     // }
-
+  
     // 根据文件类型选择初始化方式
     if (is_log_file) {
         LOG(INFO) << "检测到日志文件，使用SINS零偏参数";
