@@ -10,7 +10,7 @@
 #include "common/imu.h"
 #include "common/math_utils.h"
 #include "common/nav_state.h"
-#include "common/odom.h"
+#include <fstream> 
 
 #include <glog/logging.h>
 #include <iomanip>
@@ -34,7 +34,6 @@ class ESKF {
     using Vec18T = Eigen::Matrix<S, 18, 1>;         // 18维向量类型
     using Mat3T = Eigen::Matrix<S, 3, 3>;           // 3x3矩阵类型
     using MotionNoiseT = Eigen::Matrix<S, 18, 18>;  // 运动噪声类型
-    using OdomNoiseT = Eigen::Matrix<S, 3, 3>;      // 里程计噪声类型
     using GnssNoiseT = Eigen::Matrix<S, 6, 6>;      // GNSS噪声类型
     using Mat18T = Eigen::Matrix<S, 18, 18>;        // 18维方差类型
     using NavStateT = NavState<S>;                  // 整体名义状态变量类型
@@ -50,16 +49,16 @@ class ESKF {
         double bias_gyro_var_ = 1e-6;  // 陀螺零偏游走标准差
         double bias_acce_var_ = 1e-4;  // 加计零偏游走标准差
 
-        /// 里程计参数
-        double odom_var_ = 0.5;
-        double odom_span_ = 0.1;        // 里程计测量间隔
-        double wheel_radius_ = 0.155;   // 轮子半径
-        double circle_pulse_ = 1024.0;  // 编码器每圈脉冲数
 
         /// RTK 观测参数
         double gnss_pos_noise_ = 0.1;                   // GNSS位置噪声
         double gnss_height_noise_ = 0.1;                // GNSS高度噪声
         double gnss_ang_noise_ = 1.0 * math::kDEG2RAD;  // GNSS旋转噪声
+
+        //手机安装角参数
+        double phone_roll_install_ = 0.0 * math::kDEG2RAD;
+        double phone_pitch_install_ = 35.105171 * math::kDEG2RAD;
+        double phone_heading_install_ = -1.232156 * math::kDEG2RAD;
 
         /// 时间延迟补偿参数
         bool enable_time_compensation_ = false;  // 是否启用时间补偿
@@ -73,7 +72,7 @@ class ESKF {
     /**
      * 初始零偏取零
      */
-    ESKF(Options option = Options()) : options_(option) { BuildNoise(option); }
+    ESKF(Options option = Options()) : options_(option) { BuildNoise(option); BuildPhoneInstallMatrix(); }
 
     /**
      * 设置初始条件
@@ -90,13 +89,11 @@ class ESKF {
         ba_ = init_ba;
         g_ = gravity;
         cov_ = Mat18T::Identity() * 1e-4;
+        BuildPhoneInstallMatrix();
     }
 
     /// 使用IMU递推
     bool Predict(const IMU& imu);
-
-    /// 使用轮速计观测
-    bool ObserveWheelSpeed(const Odom& odom);
 
     /// 使用GPS观测
     bool ObserveGps(const GNSS& gnss);
@@ -148,7 +145,60 @@ class ESKF {
                   << ", delay = " << delay << "s";
     }
 
+void SaveCovariance(std::ofstream& cov_file) const {
+    cov_file << std::setprecision(18) << current_time_ << " ";
+    
+    // 保存18个对角元素
+    for (int i = 0; i < 18; ++i) {
+        cov_file << std::setprecision(9) << cov_(i, i) << " ";
+    }
+    cov_file << std::endl;
+}
+
    private:
+
+    void Euler2Cbn(double roll, double pitch, double heading, Mat3T &Cbn) {
+        Mat3T C1, C2, C3, Cnb;
+        
+        // 绕X轴旋转roll角
+        C1(0, 0) = cos(roll);  C1(0, 1) = 0;          C1(0, 2) = -sin(roll);
+        C1(1, 0) = 0;          C1(1, 1) = 1;          C1(1, 2) = 0;
+        C1(2, 0) = sin(roll);  C1(2, 1) = 0;          C1(2, 2) = cos(roll);
+        
+        // 绕Y轴旋转pitch角
+        C2(0, 0) = 1;          C2(0, 1) = 0;           C2(0, 2) = 0;
+        C2(1, 0) = 0;          C2(1, 1) = cos(pitch);  C2(1, 2) = sin(pitch);
+        C2(2, 0) = 0;          C2(2, 1) = -sin(pitch); C2(2, 2) = cos(pitch);
+        
+        // 绕Z轴旋转heading角
+        C3(0, 0) = cos(heading); C3(0, 1) = -sin(heading); C3(0, 2) = 0;
+        C3(1, 0) = sin(heading); C3(1, 1) = cos(heading);  C3(1, 2) = 0;
+        C3(2, 0) = 0;           C3(2, 1) = 0;              C3(2, 2) = 1;
+        
+        // 计算转换矩阵
+        Cnb = C1 * C2 * C3;
+        Cbn = Cnb.transpose();
+    }
+
+    void BuildPhoneInstallMatrix() {
+        // 计算手机到车体的转换矩阵
+        Euler2Cbn(options_.phone_roll_install_, 
+                    options_.phone_pitch_install_, 
+                    options_.phone_heading_install_, 
+                    C_phone_to_body_);
+    }
+
+    IMU ApplyPhoneInstallCorrection (const IMU& imu) const {
+        IMU corrected_imu = imu;
+        VecT body_acce = C_phone_to_body_ * imu.acce_;
+        VecT body_gyro = C_phone_to_body_ * imu.gyro_;
+
+        corrected_imu.acce_ = body_acce;
+        corrected_imu.gyro_ = body_gyro;
+
+        return corrected_imu;
+    }
+
     void BuildNoise(const Options& options) {
         double ev = options.acce_var_;
         double et = options.gyro_var_;
@@ -163,9 +213,6 @@ class ESKF {
         // 设置过程噪声
         Q_.diagonal() << 0, 0, 0, ev2, ev2, ev2, et2, et2, et2, eg2, eg2, eg2, ea2, ea2, ea2, 0, 0, 0;
 
-        // 设置里程计噪声
-        double o2 = options_.odom_var_ * options_.odom_var_;
-        odom_noise_.diagonal() << o2, o2, o2;
 
         // 设置GNSS状态
         double gp2 = options.gnss_pos_noise_ * options.gnss_pos_noise_;
@@ -235,11 +282,12 @@ class ESKF {
 
     /// 噪声阵
     MotionNoiseT Q_ = MotionNoiseT::Zero();
-    OdomNoiseT odom_noise_ = OdomNoiseT::Zero();
     GnssNoiseT gnss_noise_ = GnssNoiseT::Zero();
 
     /// 标志位
     bool first_gnss_ = true;  // 是否为第一个gnss数据
+
+    Mat3T C_phone_to_body_ = Mat3T::Identity();
 
     /// 配置项
     Options options_;
@@ -250,13 +298,23 @@ using ESKFF = ESKF<float>;
 
 template <typename S>
 bool ESKF<S>::Predict(const IMU& imu) {
-    assert(imu.timestamp_ >= current_time_);
+    // assert(imu.timestamp_ >= current_time_);
+
+    //应用手机安装角补偿
+    IMU corrected_imu = ApplyPhoneInstallCorrection(imu);
 
     // 应用时间补偿
-    IMU compensated_imu = ApplyTimeCompensation(imu);
+    IMU compensated_imu = ApplyTimeCompensation(corrected_imu);
 
     double dt = compensated_imu.timestamp_ - current_time_;
-    if (dt > (5 * options_.imu_dt_) || dt < 0) {
+
+   if (dt < 0) {
+        // IMU时间早于系统时间，跳过（GPS延迟导致）
+        LOG(INFO) << "skip early imu: dt = " << dt;
+        return false;
+    }
+    
+    if (dt > (5 * options_.imu_dt_)) {
         // 时间间隔不对，可能是第一个IMU数据，没有历史信息
         LOG(INFO) << "skip this imu because dt_ = " << dt;
         current_time_ = compensated_imu.timestamp_;
@@ -292,42 +350,15 @@ bool ESKF<S>::Predict(const IMU& imu) {
     return true;
 }
 
-template <typename S>
-bool ESKF<S>::ObserveWheelSpeed(const Odom& odom) {
-    assert(odom.timestamp_ >= current_time_);
-    // odom 修正以及雅可比
-    // 使用三维的轮速观测，H为3x18，大部分为零
-    Eigen::Matrix<S, 3, 18> H = Eigen::Matrix<S, 3, 18>::Zero();
-    H.template block<3, 3>(0, 3) = Mat3T::Identity();
-
-    // 卡尔曼增益
-    Eigen::Matrix<S, 18, 3> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + odom_noise_).inverse();
-
-    // velocity obs
-    double velo_l = options_.wheel_radius_ * odom.left_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
-    double velo_r =
-        options_.wheel_radius_ * odom.right_pulse_ / options_.circle_pulse_ * 2 * M_PI / options_.odom_span_;
-    double average_vel = 0.5 * (velo_l + velo_r);
-
-    VecT vel_odom(average_vel, 0.0, 0.0);
-    VecT vel_world = R_ * vel_odom;
-
-    dx_ = K * (vel_world - v_);
-
-    // update cov
-    cov_ = (Mat18T::Identity() - K * H) * cov_;
-
-    UpdateAndReset();
-    return true;
-}
 
 template <typename S>
 bool ESKF<S>::ObserveGps(const GNSS& gnss) {
     /// GNSS 观测的修正 观测更新
-    const double TIME_TOLERANCE = 0.01;
-    if (gnss.unix_time_ < current_time_ - TIME_TOLERANCE) {
-        return false;
-    }
+    
+    // const double TIME_TOLERANCE = 0.2;
+    // if (processed_gnss.unix_time_ < current_time_ - TIME_TOLERANCE) {
+    //     return false;
+    // }
 
     //首次GNSS的话直接设置初始位姿
     if (first_gnss_) {
@@ -340,7 +371,7 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
 
     assert(gnss.heading_valid_);
     ObserveSE3(gnss.utm_pose_, options_.gnss_pos_noise_, options_.gnss_ang_noise_);
-    current_time_ = std::max(current_time_, gnss.unix_time_);
+    // current_time_ = std::max(current_time_, processed_gnss.unix_time_);
 
     return true;
 }

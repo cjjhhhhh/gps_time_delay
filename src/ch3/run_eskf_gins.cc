@@ -3,7 +3,6 @@
 //
 
 #include "ch3/eskf.hpp"
-#include "ch3/static_imu_init.h"
 #include "common/io_utils.h"
 #include "utm_convert.h"
 
@@ -11,24 +10,20 @@
 #include <glog/logging.h>
 #include <fstream>
 #include <iomanip>
+#include <queue>
 
 DEFINE_string(txt_path, "/Users/cjj/Data/vdr_plog/vdr_20250613_181225_863.log", "数据文件路径");
-DEFINE_double(antenna_angle, 12.06, "RTK天线安装偏角（角度）");
-DEFINE_double(antenna_pox_x, -0.17, "RTK天线安装偏移X");
-DEFINE_double(antenna_pox_y, -0.20, "RTK天线安装偏移Y");
-DEFINE_bool(with_ui, false, "是否显示图形界面");
-DEFINE_bool(with_odom, false, "是否加入轮速计信息");
 
 /**
  * 本程序演示使用RTK+IMU进行组合导航
  */
 bool InitializeESKF(sad::ESKFD& eskf){
-    // 陀螺零偏 (度/秒) - 从SINS数据获取
+    // 陀螺零偏 (度/秒) 
     const double GYRO_BIAS_X = 0.001711;
     const double GYRO_BIAS_Y = -0.021235;
     const double GYRO_BIAS_Z = 0.049159;
     
-    // 加速度零偏 (m/s²) - 从SINS数据获取
+    // 加速度零偏 (m/s²) 
     const double ACCEL_BIAS_X = -0.013369;
     const double ACCEL_BIAS_Y = -0.020087;
     const double ACCEL_BIAS_Z = 0.101552;
@@ -58,71 +53,61 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    std::string file_ext = FLAGS_txt_path.substr(FLAGS_txt_path.find_last_of('.') + 1);
-    bool is_log_file = (file_ext == "log" || file_ext == "LOG");
-
     // 初始化器
-    sad::StaticIMUInit imu_init;  // 使用默认配置
     sad::ESKFD eskf;
 
     sad::TxtIO io(FLAGS_txt_path);
-    Vec2d antenna_pos(FLAGS_antenna_pox_x, FLAGS_antenna_pox_y);
 
     auto save_vec3 = [](std::ofstream& fout, const Vec3d& v) { fout << v[0] << " " << v[1] << " " << v[2] << " "; };
     auto save_quat = [](std::ofstream& fout, const Quatd& q) {
         fout << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " ";
     };
 
-    auto save_result = [&save_vec3, &save_quat](std::ofstream& fout, const sad::NavStated& save_state) {
+    auto save_result = [&save_vec3, &save_quat](std::ofstream& fout, const sad::NavStated& save_state,
+                                                const Vec3d& gps_pos = Vec3d::Zero(), bool has_gps = false) {
         fout << std::setprecision(18) << save_state.timestamp_ << " " << std::setprecision(9);
         save_vec3(fout, save_state.p_);
         save_quat(fout, save_state.R_.unit_quaternion());
         save_vec3(fout, save_state.v_);
         save_vec3(fout, save_state.bg_);
         save_vec3(fout, save_state.ba_);
+        //添加GPS观测位置
+        if (has_gps) {
+            save_vec3 (fout, gps_pos);
+            fout << "1";
+        } else {
+            fout << "0 0 0 0";
+        }
         fout << std::endl;
     };
 
-    std::ofstream fout("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/gins_origin.txt");
+    std::ofstream fout("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/gins_new1.txt");
+
+    // 新增：P矩阵协方差数据文件
+    std::ofstream cov_file("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/covariance_new1.txt");
+
     bool imu_inited = false, gnss_inited = false;
 
-    // std::shared_ptr<sad::ui::PangolinWindow> ui = nullptr;
-    // if (FLAGS_with_ui) {
-    //     ui = std::make_shared<sad::ui::PangolinWindow>();
-    //     ui->Init();
-    // }
   
-    // 根据文件类型选择初始化方式
-    if (is_log_file) {
-        LOG(INFO) << "检测到日志文件，使用SINS零偏参数";
-        if (InitializeESKF(eskf)) {
-            imu_inited = true;
-        }
-    } else {
-        LOG(INFO) << "普通数据文件，使用静态初始化";
+    LOG(INFO) << "初始化ESKF";
+    if (InitializeESKF(eskf)) {
+        imu_inited = true;
     }
+
+    //GNSS缓存队列
+    std::queue<sad::GNSS> pending_gps_queue;
 
     /// 设置各类回调函数
     bool first_gnss_set = false;
     Vec3d origin = Vec3d::Zero();
 
+    //存储最新的GPS观测位置
+    Vec3d latest_gps_pos = Vec3d::Zero();
+    bool has_latest_gps = false;
+    double latest_gps_time = 0.0;
+
     io.SetIMUProcessFunc([&](const sad::IMU& imu) {
           /// IMU 处理函数
-          if (!is_log_file) {
-              if (!imu_init.InitSuccess()) {
-                  imu_init.AddIMU(imu);
-                  return;
-              }
-
-              if (!imu_inited) {
-                  sad::ESKFD::Options options;
-                  options.gyro_var_ = sqrt(imu_init.GetCovGyro()[0]);
-                  options.acce_var_ = sqrt(imu_init.GetCovAcce()[0]);
-                  eskf.SetInitialConditions(options, imu_init.GetInitBg(), imu_init.GetInitBa(), imu_init.GetGravity());
-                  imu_inited = true;
-                  return;
-              }
-          }
 
           if (!gnss_inited) {
               /// 等待有效的RTK数据
@@ -132,14 +117,50 @@ int main(int argc, char** argv) {
           /// GNSS 也接收到之后，再开始进行预测
           eskf.Predict(imu);
 
-          /// predict就会更新ESKF，所以此时就可以发送数据
-          auto state = eskf.GetNominalState();
-        //   if (ui) {
-        //       ui->UpdateNavState(state);
-        //   }
+          // 记录IMU预测后的协方差
+          eskf.SaveCovariance(cov_file);
 
+          /// predict就会更新ESKF，所以此时就可以发送数据
+          auto current_state = eskf.GetNominalState();
+          double current_eskf_time = current_state.timestamp_;
+
+          //检查是否有GPS数据需要处理
+          while (!pending_gps_queue.empty()) {
+            sad::GNSS& catch_gps = pending_gps_queue.front();
+            //IMU递推到缓存的GNSS时刻
+            if (current_eskf_time >= catch_gps.unix_time_) {
+                LOG(INFO) << "=== 处理缓存的GPS数据 ===";
+                LOG(INFO) << "IMU时间: " << std::fixed << std::setprecision(9) << current_eskf_time
+                          << ", GPS时间: " << std::fixed << std::setprecision(9) << catch_gps.unix_time_;
+                try{
+
+                    eskf.ObserveGps(catch_gps);
+
+                    // 记录GPS更新后的协方差
+                    eskf.SaveCovariance(cov_file);
+
+                    LOG(INFO) << "GPS观测成功, 时间同步正确";
+                } catch (...) {
+                    LOG (ERROR) << "GNSS观测失败";
+                }
+                pending_gps_queue.pop();
+            }else {
+                // IMU还没追上GPS时刻，退出循环
+                LOG(INFO) << "等待IMU递推: current=" << std::fixed << std::setprecision(9) << current_eskf_time 
+                          << ", waiting_gps=" << catch_gps.unix_time_;
+                break;
+            }
+          }
+
+          //检查是否有时间接近的GPS观测数据
+          bool use_gps_obs = false;
+          Vec3d gps_obs_pos = Vec3d::Zero();
+          if (has_latest_gps) {
+              use_gps_obs = true;
+              gps_obs_pos = latest_gps_pos;
+          }
           /// 记录数据以供绘图
-          save_result(fout, state);
+          save_result(fout, current_state, gps_obs_pos, use_gps_obs);
 
           usleep(1e3);
       })
@@ -149,115 +170,69 @@ int main(int argc, char** argv) {
                 LOG(INFO) << "GPS: IMU未初始化，跳过";
                 return;
             }
-            
+            //添加GNSS时间延迟
+            sad::GNSS gnss_convert = gnss;
+            gnss_convert.unix_time_ += 0.0;
+
             auto current_state = eskf.GetNominalState();
             double current_eskf_time = current_state.timestamp_;
             
-            LOG(INFO) << "=== GPS处理开始 ===";
-            LOG(INFO) << "步骤1 - 收到GPS数据";
-            LOG(INFO) << std::fixed << std::setprecision(6) 
-                      << "  GPS时间戳: " << gnss.unix_time_ << "s";
-            LOG(INFO) << std::fixed << std::setprecision(6) 
-                      << "  ESKF时间: " << current_eskf_time << "s";
-            LOG(INFO) << std::fixed << std::setprecision(6) 
-                      << "  时间差: " << (gnss.unix_time_ - current_eskf_time) << "s";
-            
-            // 如果GPS时间戳太旧（超过5秒），直接跳过
-            if (gnss.unix_time_ < current_eskf_time - 5.0) {
-                LOG(WARNING) << "步骤2 - GPS时间戳太旧，跳过处理。时间差: " << (current_eskf_time - gnss.unix_time_) << "s";
+            LOG(INFO) << "=== GPS数据到达 ===";
+            LOG(INFO) << "原始GPS时间: " << gnss.unix_time_ << "s";
+            LOG(INFO) << "延迟GPS时间: " << gnss_convert.unix_time_ << "s"; 
+            LOG(INFO) << "当前ESKF时间: " << current_eskf_time << "s";
+            LOG(INFO) << "时间差: " << (gnss_convert.unix_time_ - current_eskf_time) << "s";
+
+            // 跳过太旧的GPS
+            if (gnss_convert.unix_time_ < current_eskf_time - 5.0) {
+                LOG(WARNING) << "GPS数据太旧，跳过";
                 return;
             }
-            LOG(INFO) << "步骤2 - GPS时间戳检查通过";
-
-            sad::GNSS gnss_convert = gnss;
-            LOG(INFO) << "步骤3 - 创建GPS副本，时间戳: " << gnss_convert.unix_time_ << "s";
-
-            if (!sad::ConvertGps2UTM(gnss_convert, antenna_pos, FLAGS_antenna_angle) || !gnss_convert.heading_valid_) {
-                if (is_log_file && sad::ConvertGps2UTM(gnss_convert, antenna_pos, FLAGS_antenna_angle)) {
-                    gnss_convert.heading_valid_ = false;
-                    LOG(INFO) << "步骤4 - GPS坐标转换成功，但航向无效";
-                } else {
-                    LOG(WARNING) << "步骤4 - GPS坐标转换失败";
-                    return;
-                }
-            } else {
-                LOG(INFO) << "步骤4 - GPS坐标转换成功，航向有效";
+            if (!sad::ConvertGps2UTM(gnss_convert, Vec2d::Zero(), 0.0)) {
+                LOG(WARNING) << "GPS坐标转换失败";
+                return;
             }
-            
-            LOG(INFO) << "步骤5 - GPS转换后时间戳: " << gnss_convert.unix_time_ << "s";
-
-            /// 去掉原点
+            /// 设置地图原点（去掉原点）
             if (!first_gnss_set) {
                 origin = gnss_convert.utm_pose_.translation();
                 first_gnss_set = true;
-                LOG(INFO) << "步骤6 - 设置地图原点: " << origin.transpose();
+                LOG(INFO) << "设置地图原点: " << origin.transpose();
             } else {
                 LOG(INFO) << "步骤6 - 使用已有地图原点";
             }
+            
+            //保存GPS观测位置（去掉原点）
+            Vec3d gps_obs_position = gnss_convert.utm_pose_.translation() - origin;
+            latest_gps_pos = gps_obs_position;
+            has_latest_gps = true;
+            latest_gps_time = gnss_convert.unix_time_;
+
+            LOG(INFO) << "步骤6.5 - 保存GPS观测位置" << gps_obs_position.transpose();
+
             gnss_convert.utm_pose_.translation() -= origin;
             
             LOG(INFO) << "步骤7 - 应用地图原点后，GPS时间戳: " << gnss_convert.unix_time_ << "s";
 
-            // 要求RTK heading有效，才能合入ESKF
-            if (is_log_file || gnss_convert.heading_valid_) {
-                LOG(INFO) << "步骤8 - 准备进行GPS观测";
-                
-                // 最后检查一次ESKF时间
-                auto final_state = eskf.GetNominalState();
-                double final_eskf_time = final_state.timestamp_;
-                LOG(INFO) << "步骤9 - 最终检查 (高精度):";
-                LOG(INFO) << std::fixed << std::setprecision(6) 
-                        << "  GPS时间戳: " << gnss_convert.unix_time_ << "s";
-                LOG(INFO) << std::fixed << std::setprecision(6) 
-                        << "  ESKF时间: " << final_eskf_time << "s";
-                LOG(INFO) << std::fixed << std::setprecision(6) 
-                        << "  精确时间差: " << (gnss_convert.unix_time_ - final_eskf_time) << "s";
-                    
-                if (gnss_convert.unix_time_ < final_eskf_time) {
-                    LOG(WARNING) << "检测到时间戳冲突！";
-                    LOG(WARNING) << std::fixed << std::setprecision(9) 
-                                << "  GPS=" << gnss_convert.unix_time_ 
-                                << "s < ESKF=" << final_eskf_time << "s";
-                    LOG(WARNING) << std::fixed << std::setprecision(9) 
-                                << "  精确差值: " << (final_eskf_time - gnss_convert.unix_time_) << "s";
-                } else {
-                    LOG(INFO) << "步骤10 - 时间戳检查通过";
-                }
-                
-                LOG(INFO) << "步骤11 - 调用eskf.ObserveGps()...";
-                try {
+            try {
+                if (current_eskf_time >= gnss_convert.unix_time_) {
+                    LOG(INFO) << "GPS时间不超前, 立即处理";
                     eskf.ObserveGps(gnss_convert);
-                    LOG(INFO) << "步骤12 - GPS观测成功！";
-                    
-                    auto state = eskf.GetNominalState();
-                    save_result(fout, state);
+                    eskf.SaveCovariance(cov_file);
+                    LOG(INFO) << "GPS观测成功";
                     gnss_inited = true;
-                    
-                } catch (const std::exception& e) {
-                    LOG(ERROR) << "步骤12 - GPS观测异常: " << e.what();
-                } catch (...) {
-                    LOG(ERROR) << "步骤12 - GPS观测未知异常";
+                } else {
+                    LOG(INFO) << "GPS时间超前, 缓存等待IMU递推";
+                    pending_gps_queue.push(gnss_convert);
+                    gnss_inited = true;
                 }
-            } else {
-                LOG(INFO) << "步骤8 - GPS航向无效，跳过观测";
+            } catch (...) {
+                LOG(ERROR) << "GPS观测异常";
             }
+
             
             LOG(INFO) << "=== GPS处理结束 ===";
         })
-        .SetOdomProcessFunc([&](const sad::Odom& odom) {
-            /// Odom 处理函数，本章Odom只给初始化使用
-            imu_init.AddOdom(odom);
-            if (FLAGS_with_odom && imu_inited && gnss_inited) {
-                eskf.ObserveWheelSpeed(odom);
-            }
-        })
         .Go();
 
-    // while (ui && !ui->ShouldQuit()) {
-    //     usleep(1e5);
-    // }
-    // if (ui) {
-    //     ui->Quit();
-    // }
     return 0;
 }
