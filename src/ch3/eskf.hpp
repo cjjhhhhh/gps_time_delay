@@ -41,7 +41,7 @@ class ESKF {
     struct Options {
         Options() = default;
 
-        /// IMU 测量与零偏参数
+        /// IMU 测量与零偏参数 Q阵参数
         double imu_dt_ = 0.04;  // IMU测量间隔
         // NOTE IMU噪声项都为离散时间，不需要再乘dt，可以由初始化器指定IMU噪声
         double gyro_var_ = 1e-5;       // 陀螺测量标准差
@@ -50,15 +50,15 @@ class ESKF {
         double bias_acce_var_ = 1e-4;  // 加计零偏游走标准差
 
 
-        /// RTK 观测参数
-        double gnss_pos_noise_ = 0.1;                   // GNSS位置噪声
-        double gnss_height_noise_ = 0.1;                // GNSS高度噪声
+        /// RTK 观测参数 R阵参数
+        double gnss_pos_noise_ = 5.0;                   // GNSS位置噪声
+        double gnss_height_noise_ = 1.0;                // GNSS高度噪声
         double gnss_ang_noise_ = 1.0 * math::kDEG2RAD;  // GNSS旋转噪声
 
         //手机安装角参数
         double phone_roll_install_ = 0.0 * math::kDEG2RAD;
-        double phone_pitch_install_ = 35.105171 * math::kDEG2RAD;
-        double phone_heading_install_ = -1.232156 * math::kDEG2RAD;
+        double phone_pitch_install_ = (90 + (-19.549240)) * math::kDEG2RAD;
+        double phone_heading_install_ = -1.584286 * math::kDEG2RAD;
 
         /// 时间延迟补偿参数
         bool enable_time_compensation_ = false;  // 是否启用时间补偿
@@ -105,7 +105,7 @@ class ESKF {
      * @param ang_noise   角度噪声
      * @return
      */
-    bool ObserveSE3(const SE3& pose, double trans_noise = 0.1, double ang_noise = 1.0 * math::kDEG2RAD);
+    bool ObserveSE3(const SE3& pose, double trans_noise = 3.0, double ang_noise = 3.0 * math::kDEG2RAD);
 
     /// accessors
     /// 获取全量状态
@@ -155,6 +155,16 @@ void SaveCovariance(std::ofstream& cov_file) const {
     cov_file << std::endl;
 }
 
+double GetCurrentHeading() const {
+    return atan2(R_.matrix()(1, 0), R_.matrix()(0, 0));
+}
+
+double ComputeLateralResidual(const Vec3d& utm_residual) const {
+    double heading = GetCurrentHeading();
+    double dis_e = utm_residual.x(); // 东向残差
+    double dis_n = utm_residual.y(); // 北向残差
+    return dis_e * cos(heading) - dis_n * sin(heading);
+}
    private:
 
     void Euler2Cbn(double roll, double pitch, double heading, Mat3T &Cbn) {
@@ -192,6 +202,9 @@ void SaveCovariance(std::ofstream& cov_file) const {
         IMU corrected_imu = imu;
         VecT body_acce = C_phone_to_body_ * imu.acce_;
         VecT body_gyro = C_phone_to_body_ * imu.gyro_;
+
+        double body_z_accel = body_acce[2];
+        LOG(INFO) << "Z轴加速度: " << body_z_accel << " m/s² (理论值应接近±9.8)";
 
         corrected_imu.acce_ = body_acce;
         corrected_imu.gyro_ = body_gyro;
@@ -362,6 +375,13 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
 
     //首次GNSS的话直接设置初始位姿
     if (first_gnss_) {
+        double initial_yaw_rad = atan2(gnss.utm_pose_.so3().matrix()(1, 0), 
+                                      gnss.utm_pose_.so3().matrix()(0, 0));
+        double initial_yaw_deg = initial_yaw_rad * 180.0 / M_PI;
+        if (initial_yaw_deg < 0) initial_yaw_deg += 360.0;
+        
+        LOG(INFO) << "ESKF初始航向: " << initial_yaw_deg << "°";
+
         R_ = gnss.utm_pose_.so3();
         p_ = gnss.utm_pose_.translation();
         first_gnss_ = false;
@@ -369,7 +389,10 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
         return true;
     }
 
-    assert(gnss.heading_valid_);
+    if (!gnss.heading_valid_) {
+        LOG(WARNING) << "GPS航向数据无效, 跳过观测更新";
+        return false;
+    }
     ObserveSE3(gnss.utm_pose_, options_.gnss_pos_noise_, options_.gnss_ang_noise_);
     // current_time_ = std::max(current_time_, processed_gnss.unix_time_);
 
@@ -387,13 +410,13 @@ bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     H.template block<3, 3>(3, 6) = Mat3T::Identity();  // R部分（3.66)
 
     // 卡尔曼增益和更新过程
-    //2. 观测噪声协方差矩阵
+    //2. 观测噪声协方差矩阵R
     Vec6d noise_vec;
     noise_vec << trans_noise, trans_noise, trans_noise, ang_noise, ang_noise, ang_noise;
 
     Mat6d V = noise_vec.asDiagonal();
     
-    //3. 卡尔曼增益计算
+    //3. 卡尔曼增益计算K
     Eigen::Matrix<S, 18, 6> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + V).inverse();
 
     // 更新x和cov
@@ -402,6 +425,10 @@ bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     Vec6d innov = Vec6d::Zero();
     innov.template head<3>() = (pose.translation() - p_);          // 平移部分
     innov.template tail<3>() = (R_.inverse() * pose.so3()).log();  // 旋转部分(3.67)
+    
+    //清除对横滚roll、俯仰pitch的观测残差
+    innov[3] = 0.0;
+    innov[4] = 0.0;
 
     //5. 状态更新
     dx_ = K * innov;

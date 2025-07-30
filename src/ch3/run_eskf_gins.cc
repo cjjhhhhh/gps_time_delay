@@ -10,9 +10,33 @@
 #include <glog/logging.h>
 #include <fstream>
 #include <iomanip>
+#include <vector>
+#include <algorithm>
 #include <queue>
 
-DEFINE_string(txt_path, "/Users/cjj/Data/vdr_plog/vdr_20250613_181225_863.log", "数据文件路径");
+DEFINE_string(txt_path, "/Users/cjj/Data/vdr_plog/Honor_V40/vdr_20250523_162014_895.log", "数据文件路径");
+DEFINE_bool(offline_mode, false, "是否使用离线重组织模式");
+DEFINE_double(gps_time_offset, 0.0, "GPS时间偏移");
+
+//时间戳数据结构
+struct TimeStampedData {
+    double timestamp;
+    enum DataType { IMU_TYPE, GPS_TYPE } type;
+
+    sad::IMU imu_data;
+    sad::GNSS gps_data;
+
+    TimeStampedData(const sad::IMU& imu)
+        : timestamp(imu.timestamp_), type(IMU_TYPE), imu_data(imu) {}
+
+    TimeStampedData(const sad::GNSS& gnss)
+        : timestamp(gnss.unix_time_), type(GPS_TYPE), gps_data(gnss) {}
+
+    bool operator<(const TimeStampedData& other) const {
+        return timestamp < other.timestamp;
+    }
+};
+
 
 /**
  * 本程序演示使用RTK+IMU进行组合导航
@@ -43,26 +67,267 @@ bool InitializeESKF(sad::ESKFD& eskf){
 
 
 }
-int main(int argc, char** argv) {
-    google::InitGoogleLogging(argv[0]);
-    FLAGS_stderrthreshold = google::INFO;
-    FLAGS_colorlogtostderr = true;
-    google::ParseCommandLineFlags(&argc, &argv, true);
 
-    if (FLAGS_txt_path.empty()) {
+//离线数据管理
+class OfflineDataManager {
+private:
+    std::vector<TimeStampedData> all_data_;
+    double gps_time_offset_ = 0.0;
+
+public:
+    void SetGPSTimeOffset(double offset) {
+        gps_time_offset_ = offset;
+        LOG(INFO) << "设置GPS时间偏移" << offset << "s";
+    }
+
+    bool LoadAndReorganizeData (const std::string& file_path) {
+        std::vector<sad::IMU> imu_data;
+        std::vector<sad::GNSS> gps_data;
+
+        // 读取数据
+        if(!ReadAllData(file_path, imu_data, gps_data)) {
+            LOG(ERROR) << "数据读取失败" ;
+            return false;
+        }
+
+        // 应用时间偏移
+        ConvertToTimeStampedData (imu_data, gps_data);
+
+        // 按时间戳排序
+        std::sort (all_data_.begin(), all_data_.end());
+
+        return true;
+    }
+
+    //获取重组织后的数据
+    const std::vector<TimeStampedData>& GetReorganizedData() const {
+        return all_data_;
+    }
+
+private:
+    //读取所有数据
+    bool ReadAllData(const std::string& file_path,
+                    std::vector<sad::IMU>& imu_data,
+                    std::vector<sad::GNSS>& gps_data) {
+                        
+        sad::TxtIO io(file_path);
+        io.SetIMUProcessFunc([&](const sad::IMU& imu){
+            imu_data.push_back(imu);
+        }).SetGNSSProcessFunc([&](const sad::GNSS& gps){
+            gps_data.push_back(gps);
+        });
+
+        io.Go();
+
+        return !imu_data.empty() && !gps_data.empty();
+     }
+
+     void ConvertToTimeStampedData(const std::vector<sad::IMU>& imu_data,
+                                   const std::vector<sad::GNSS>& gps_data) {
+        all_data_.clear();
+        all_data_.reserve(imu_data.size() + gps_data.size());
+
+        for (const auto& imu : imu_data) {
+            all_data_.emplace_back(imu);
+        }
+        for (auto gps : gps_data) {
+            gps.unix_time_ += gps_time_offset_;
+            all_data_.emplace_back(gps);
+        }
+    }
+};
+
+//离线ESKF
+class OfflineESKFProcessor {
+private:
+    sad::ESKFD eskf_;
+    bool first_gps_processed_ = false;
+    Vec3d origin_ = Vec3d::Zero();
+    std::ofstream correction_file_; // 位置修正量
+    std::ofstream lateral_residual_file_; // 横向残差
+
+public:
+    //初始化ESKF
+    bool Initialize(const std::string& correction_output_path) {
+        if (!InitializeESKF(eskf_)){
+            return false;
+        }
+        correction_file_.open(correction_output_path);
+        if(!correction_file_.is_open()){
+            return false;
+        }
+
+        std::string lateral_path = correction_output_path.substr(0, correction_output_path.find_last_of('.')) + "_lateral.txt";
+        lateral_residual_file_.open(lateral_path);
+        if(!lateral_residual_file_.is_open()){
+            return false;
+        }
+        return true;
+    }
+
+    //处理重组织后的数据
+    bool ProcessReorganizedData(const std::vector<TimeStampedData>& data,
+                                const std::string& output_path) {
+        std::ofstream fout(output_path);
+        std::string cov_path = output_path.substr(0, output_path.find_last_of('.')) + "_cov.txt";
+        std::ofstream cov_file(cov_path);
+        
+        auto save_vec3 = [](std::ofstream& fout, const Vec3d& v) {
+            fout << v[0] << " " << v[1] << " " << v[2] << " ";
+        };
+        auto save_quat = [](std::ofstream& fout, const Quatd& q) {
+            fout << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " ";
+        };
+
+        auto save_result = [&](const sad::NavStated& state, const Vec3d& gps_pos, bool has_gps) {
+            fout << std::setprecision(18) << state.timestamp_ << " " << std::setprecision(9);
+            save_vec3(fout, state.p_);
+            save_quat(fout, state.R_.unit_quaternion());
+            save_vec3(fout, state.v_);
+            save_vec3(fout, state.bg_);
+            save_vec3(fout, state.ba_);
+            if (has_gps) {
+                save_vec3(fout, gps_pos);
+                fout << "1";
+            } else {
+                fout<< "0 0 0 0";
+            }
+            fout << std::endl;
+        };
+
+        Vec3d latest_gps_pos = Vec3d::Zero();
+        bool has_latest_gps = false;
+
+        for (const auto& timestamped_data : data) {
+            if (timestamped_data.type == TimeStampedData::IMU_TYPE) {
+                if (ProcessIMU(timestamped_data.imu_data, cov_file)){
+                    auto state = eskf_.GetNominalState();
+                    save_result(state, latest_gps_pos, has_latest_gps);
+                }
+            } else {
+                Vec3d gps_pos;
+                if (ProcessGPS(timestamped_data.gps_data, gps_pos)) {
+                    latest_gps_pos = gps_pos;
+                    has_latest_gps = true;
+                    eskf_.SaveCovariance(cov_file);
+                }
+            }
+        }
+        return true;
+    }
+
+private:
+    bool ProcessIMU(const sad::IMU& imu, std::ofstream& cov_file) {
+        //等待第一个GPS
+        if(!first_gps_processed_) {
+            return false;
+        }
+
+        bool success = eskf_.Predict(imu);
+        if (success) {
+            eskf_.SaveCovariance(cov_file);
+        }
+        return success;
+    }
+
+    bool ProcessGPS(const sad::GNSS& gps, Vec3d& gps_pos) {
+        sad::GNSS gps_convert = gps;
+        if (!sad::ConvertGps2UTM(gps_convert, Vec2d::Zero(), 0.0)) {
+            LOG(WARNING) << "GPS坐标转换失败";
+            return false;
+        }
+        if (!first_gps_processed_) {
+            origin_ = gps_convert.utm_pose_.translation();
+            first_gps_processed_ = true;
+        }
+        //应用原点偏移
+        gps_pos = gps_convert.utm_pose_.translation() - origin_;
+        gps_convert.utm_pose_.translation() -= origin_;
+        
+        Vec3d pos_before = eskf_.GetNominalState().p_;
+        Vec3d pos_residual = gps_convert.utm_pose_.translation() - pos_before;
+
+        double lateral_residual = eskf_.ComputeLateralResidual(pos_residual);
+        double heading = eskf_.GetCurrentHeading();
+        double speed = eskf_.GetNominalState().v_.norm();
+        double residual_norm = pos_residual.norm();
+
+        lateral_residual_file_ << std::fixed << std::setprecision(9)
+                               << gps.unix_time_ << " "
+                               << lateral_residual << " "
+                               << heading << " "
+                               << speed << " "
+                               << pos_residual.x() << " " << pos_residual.y() << " "
+                               << residual_norm
+                               << std::endl;
+
+        bool success = eskf_.ObserveGps(gps_convert);
+        if(success) {
+            Vec3d pos_after = eskf_.GetNominalState().p_;
+            Vec3d pos_correction = pos_after - pos_before;
+            double correction_norm = pos_correction.norm();
+            double residual_norm = pos_residual.norm();
+            correction_file_ << std::fixed << std::setprecision(9)
+                             << gps.unix_time_ << " "
+                             << pos_correction.x() << " " << pos_correction.y() << " " << pos_correction.z() << " "
+                             << correction_norm << " "
+                             << pos_residual.x() << " " << pos_residual.y() << " " << pos_residual.z() << " "
+                             << residual_norm
+                             << std::endl;
+        }
+        return success;
+    }
+};
+
+//离线模式
+int RunOfflineMode() {
+    LOG(INFO) << "离线模式";
+    LOG(INFO) << "GPS时间偏移" << FLAGS_gps_time_offset << "s";
+    
+    //数据管理器
+    OfflineDataManager data_manager;
+    data_manager.SetGPSTimeOffset(FLAGS_gps_time_offset);
+
+    if(!data_manager.LoadAndReorganizeData(FLAGS_txt_path)) {
+        LOG(ERROR) << "数据加载失败";
         return -1;
     }
 
-    // 初始化器
+    std::string correction_path_ = "corrections";
+    if (FLAGS_gps_time_offset != 0.0){
+        correction_path_ += "_" + std::to_string(static_cast<int>(FLAGS_gps_time_offset * 1000)) + "ms";
+    }
+    correction_path_ += ".txt";
+
+    //ESKF处理器
+    OfflineESKFProcessor processor;
+    if (!processor.Initialize(correction_path_)) {
+        LOG(ERROR) << "ESKF初始化失败";
+        return -1;
+    }
+
+    std::string output_path = "gins_offline";
+    if (FLAGS_gps_time_offset != 0.0) {
+        int offset_ms = static_cast<int>(FLAGS_gps_time_offset * 1000);
+        output_path += "_" + std::to_string(offset_ms) + "ms";
+    }
+    output_path += ".txt";
+
+    if (!processor.ProcessReorganizedData(data_manager.GetReorganizedData(), output_path)) {
+        LOG(ERROR) << "数据处理失败";
+        return -1;
+    }
+    
+    return 0;
+}
+
+int RunRealtimeMode() {
     sad::ESKFD eskf;
-
     sad::TxtIO io(FLAGS_txt_path);
-
     auto save_vec3 = [](std::ofstream& fout, const Vec3d& v) { fout << v[0] << " " << v[1] << " " << v[2] << " "; };
     auto save_quat = [](std::ofstream& fout, const Quatd& q) {
         fout << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << " ";
     };
-
     auto save_result = [&save_vec3, &save_quat](std::ofstream& fout, const sad::NavStated& save_state,
                                                 const Vec3d& gps_pos = Vec3d::Zero(), bool has_gps = false) {
         fout << std::setprecision(18) << save_state.timestamp_ << " " << std::setprecision(9);
@@ -71,7 +336,6 @@ int main(int argc, char** argv) {
         save_vec3(fout, save_state.v_);
         save_vec3(fout, save_state.bg_);
         save_vec3(fout, save_state.ba_);
-        //添加GPS观测位置
         if (has_gps) {
             save_vec3 (fout, gps_pos);
             fout << "1";
@@ -80,15 +344,13 @@ int main(int argc, char** argv) {
         }
         fout << std::endl;
     };
-
-    std::ofstream fout("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/gins_new1.txt");
+    std::ofstream fout("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/gins_realtime.txt");
 
     // 新增：P矩阵协方差数据文件
-    std::ofstream cov_file("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/covariance_new1.txt");
+    std::ofstream cov_file("/Users/cjj/work/GNSS_INS/slam/gnss_imu_time/data/ch3/covariance_realtime.txt");
 
     bool imu_inited = false, gnss_inited = false;
 
-  
     LOG(INFO) << "初始化ESKF";
     if (InitializeESKF(eskf)) {
         imu_inited = true;
@@ -235,4 +497,21 @@ int main(int argc, char** argv) {
         .Go();
 
     return 0;
+}
+
+int main(int argc, char** argv) {
+    google::InitGoogleLogging(argv[0]);
+    FLAGS_stderrthreshold = google::INFO;
+    FLAGS_colorlogtostderr = true;
+    google::ParseCommandLineFlags(&argc, &argv, true);
+
+    if (FLAGS_txt_path.empty()) {
+        return -1;
+    }
+
+    if (FLAGS_offline_mode) {
+        return RunOfflineMode();
+    } else {
+        return RunRealtimeMode();
+    }
 }
