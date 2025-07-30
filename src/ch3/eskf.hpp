@@ -98,6 +98,9 @@ class ESKF {
     /// 使用GPS观测
     bool ObserveGps(const GNSS& gnss);
 
+    /// 新增：仅观测位置，不观测航向
+    bool ObservePositionOnly(const GNSS& gnss);
+
     /**
      * 使用SE3进行观测
      * @param pose  观测位姿
@@ -106,6 +109,9 @@ class ESKF {
      * @return
      */
     bool ObserveSE3(const SE3& pose, double trans_noise = 3.0, double ang_noise = 3.0 * math::kDEG2RAD);
+
+    /// 新增：仅观测位置部分
+    bool ObservePositionOnly(const SE3& pose, double trans_noise = 3.0);
 
     /// accessors
     /// 获取全量状态
@@ -204,7 +210,7 @@ double ComputeLateralResidual(const Vec3d& utm_residual) const {
         VecT body_gyro = C_phone_to_body_ * imu.gyro_;
 
         double body_z_accel = body_acce[2];
-        LOG(INFO) << "Z轴加速度: " << body_z_accel << " m/s² (理论值应接近±9.8)";
+        // LOG(INFO) << "Z轴加速度: " << body_z_accel << " m/s² (理论值应接近±9.8)";
 
         corrected_imu.acce_ = body_acce;
         corrected_imu.gyro_ = body_gyro;
@@ -400,6 +406,32 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
 }
 
 template <typename S>
+bool ESKF<S>::ObservePositionOnly(const GNSS& gnss) {
+    /// 仅位置观测，不观测航向
+    
+    //首次GNSS的话直接设置初始位姿
+    if (first_gnss_) {
+        double initial_yaw_rad = atan2(gnss.utm_pose_.so3().matrix()(1, 0), 
+                                      gnss.utm_pose_.so3().matrix()(0, 0));
+        double initial_yaw_deg = initial_yaw_rad * 180.0 / M_PI;
+        if (initial_yaw_deg < 0) initial_yaw_deg += 360.0;
+        
+        LOG(INFO) << "ESKF初始航向: " << initial_yaw_deg << "°";
+
+        R_ = gnss.utm_pose_.so3();
+        p_ = gnss.utm_pose_.translation();
+        first_gnss_ = false;
+        current_time_ = gnss.unix_time_;
+        return true;
+    }
+
+    // 只观测位置部分
+    ObservePositionOnly(gnss.utm_pose_, options_.gnss_pos_noise_);
+    return true;
+}
+
+
+template <typename S>
 bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) {
     /// 既有旋转，也有平移
     /// 观测状态变量中的p, R，H为6x18，其余为零
@@ -429,6 +461,34 @@ bool ESKF<S>::ObserveSE3(const SE3& pose, double trans_noise, double ang_noise) 
     //清除对横滚roll、俯仰pitch的观测残差
     innov[3] = 0.0;
     innov[4] = 0.0;
+
+    //5. 状态更新
+    dx_ = K * innov;
+    cov_ = (Mat18T::Identity() - K * H) * cov_;
+
+    UpdateAndReset();
+    return true;
+}
+
+template <typename S>
+bool ESKF<S>::ObservePositionOnly(const SE3& pose, double trans_noise) {
+    /// 仅观测位置，H为3x18矩阵
+    
+    //1. 观测模型雅可比矩阵H - 只有位置部分
+    Eigen::Matrix<S, 3, 18> H = Eigen::Matrix<S, 3, 18>::Zero();
+    H.template block<3, 3>(0, 0) = Mat3T::Identity();  // 只有P部分
+
+    // 卡尔曼增益和更新过程
+    //2. 观测噪声协方差矩阵R - 只有位置噪声
+    Vec3d noise_vec;
+    noise_vec << trans_noise, trans_noise, trans_noise;
+    Mat3T V = noise_vec.asDiagonal();
+    
+    //3. 卡尔曼增益计算K
+    Eigen::Matrix<S, 18, 3> K = cov_ * H.transpose() * (H * cov_ * H.transpose() + V).inverse();
+
+    //4. 观测残差计算 - 只有位置部分
+    Vec3d innov = pose.translation() - p_;
 
     //5. 状态更新
     dx_ = K * innov;

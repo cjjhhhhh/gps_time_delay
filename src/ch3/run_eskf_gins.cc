@@ -304,6 +304,9 @@ private:
     std::ofstream correction_file_; // 位置修正量
     std::ofstream lateral_residual_file_; // 横向残差
 
+    // 新增：转弯段信息
+    std::vector<std::pair<double, double>> turn_segments_;  // (start_time, end_time)
+
     // 新增：GPS-NZZ匹配数据存储
     struct MatchedGPSNZZ {
         double gps_timestamp;
@@ -385,6 +388,15 @@ public:
         return true;
     }
 
+    // 新增：设置转弯段信息
+    void SetTurnSegments(const std::vector<TurnDetector::TurnSegment>& segments) {
+        turn_segments_.clear();
+        for (const auto& segment : segments) {
+            turn_segments_.emplace_back(segment.start_time, segment.end_time);
+        }
+        LOG(INFO) << "设置转弯段信息: " << turn_segments_.size() << " 个转弯段";
+    }
+
 private:
     bool ProcessIMU(const sad::IMU& imu, std::ofstream& cov_file) {
         //等待第一个GPS
@@ -397,6 +409,16 @@ private:
             eskf_.SaveCovariance(cov_file);
         }
         return success;
+    }
+
+    // 新增：检查是否在转弯段内
+    bool IsInTurnSegment(double timestamp) const {
+        for (const auto& segment : turn_segments_) {
+            if (timestamp >= segment.first && timestamp <= segment.second) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool ProcessGPS(const sad::GNSS& gps, Vec3d& gps_pos) {
@@ -430,7 +452,16 @@ private:
                                << residual_norm
                                << std::endl;
 
-        bool success = eskf_.ObserveGps(gps_convert);
+        // 新增：根据转弯状态选择观测方式
+        bool success = false;
+        if (IsInTurnSegment(gps.unix_time_)) {
+            // 转弯期间：只做位置观测
+            success = eskf_.ObservePositionOnly(gps_convert);
+        } else {
+            // 直线期间：完整观测
+            success = eskf_.ObserveGps(gps_convert);
+        }
+
         if(success) {
             Vec3d pos_after = eskf_.GetNominalState().p_;
             Vec3d pos_correction = pos_after - pos_before;
@@ -480,19 +511,8 @@ int RunOfflineMode() {
         return -1;
     }
 
-    std::string output_path = "gins_offline";
-    if (FLAGS_gps_time_offset != 0.0) {
-        int offset_ms = static_cast<int>(FLAGS_gps_time_offset * 1000);
-        output_path += "_" + std::to_string(offset_ms) + "ms";
-    }
-    output_path += ".txt";
-
-    if (!processor.ProcessReorganizedData(data_manager.GetReorganizedData(), output_path)) {
-        LOG(ERROR) << "数据处理失败";
-        return -1;
-    }
-
-    // 可选的转弯检测
+    // 转弯检测
+    std::vector<TurnDetector::TurnSegment> detected_turns;
     if (FLAGS_enable_turn_detection) {
         LOG(INFO) << "开始转弯检测分析...";
         
@@ -530,9 +550,29 @@ int RunOfflineMode() {
             
             // 完成转弯检测
             turn_detector.Finalize();
-            
+
+            // 获取检测到的转弯段
+            detected_turns = turn_detector.GetDetectedTurns();
+
             LOG(INFO) << "转弯检测分析完成";
         }
+    }
+
+    // 设置转弯段信息到处理器
+    if (!detected_turns.empty()) {
+        processor.SetTurnSegments(detected_turns);
+    }
+
+    std::string output_path = "gins_offline";
+    if (FLAGS_gps_time_offset != 0.0) {
+        int offset_ms = static_cast<int>(FLAGS_gps_time_offset * 1000);
+        output_path += "_" + std::to_string(offset_ms) + "ms";
+    }
+    output_path += ".txt";
+
+    if (!processor.ProcessReorganizedData(data_manager.GetReorganizedData(), output_path)) {
+        LOG(ERROR) << "数据处理失败";
+        return -1;
     }
 
     return 0;

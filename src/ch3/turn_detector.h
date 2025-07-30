@@ -100,6 +100,13 @@ public:
      */
     void Finalize();
 
+    /**
+     * 获取检测到的转弯段
+     */
+    const std::vector<TurnSegment>& GetDetectedTurns() const {
+        return detected_turns_;
+    }
+
 private:
     /**
      * 标准化航向角差值，处理360度跳变 - 对应Python的normalize_heading_diff
