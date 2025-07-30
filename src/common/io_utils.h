@@ -15,8 +15,29 @@
 #include "common/imu.h"
 #include "common/math_utils.h"
 #include "common/odom.h"
+#include <set>  
 
 namespace sad {
+
+/// NZZ数据结构
+struct NZZ {
+    std::string time_key_;  // 时间字符串，用于匹配 "2025-6-12 11:22:27"
+    double heading_;        // 航向角（度）
+    
+    NZZ() = default;
+    NZZ(const std::string& time_key, double heading) : time_key_(time_key), heading_(heading) {}
+};
+
+/// 带时间字符串的GPS数据结构，用于GPS-NZZ匹配
+struct GPSWithTimeKey {
+    GNSS gnss_data_;       // 原始GPS数据
+    std::string time_key_; // 时间字符串，用于匹配 "2025-6-12 11:22:27"
+    
+    GPSWithTimeKey() = default;
+    GPSWithTimeKey(const GNSS& gnss, const std::string& time_key) 
+        : gnss_data_(gnss), time_key_(time_key) {}
+};
+
 
 /**
  * 读取本书提供的数据文本文件，并调用回调函数
@@ -30,6 +51,8 @@ class TxtIO {
     using IMUProcessFuncType = std::function<void(const IMU &)>;
     using OdomProcessFuncType = std::function<void(const Odom &)>;
     using GNSSProcessFuncType = std::function<void(const GNSS &)>;
+    using NZZProcessFuncType = std::function<void(const NZZ &)>;
+    using GPSWithTimeKeyProcessFuncType = std::function<void(const GPSWithTimeKey &)>;
 
     TxtIO &SetIMUProcessFunc(IMUProcessFuncType imu_proc) {
         imu_proc_ = std::move(imu_proc);
@@ -45,6 +68,17 @@ class TxtIO {
         gnss_proc_ = std::move(gnss_proc);
         return *this;
     }
+
+    TxtIO &SetNZZProcessFunc(NZZProcessFuncType nzz_proc) {
+        nzz_proc_ = std::move(nzz_proc);
+        return *this;
+    }
+
+    TxtIO &SetGPSWithTimeKeyProcessFunc(GPSWithTimeKeyProcessFuncType gps_timekey_proc) {
+        gps_timekey_proc_ = std::move(gps_timekey_proc);
+        return *this;
+    }
+
 
     // 遍历文件内容，调用回调函数
     void Go();
@@ -67,7 +101,8 @@ class TxtIO {
     void ProcessGPS(std::stringstream& ss);
     void ProcessACC(std::stringstream& ss);
     void ProcessGYR(std::stringstream& ss);
-    
+    void ProcessNZZ(std::stringstream& ss);
+
     /// 尝试组合IMU数据
     void TryCreateIMU();
 
@@ -75,11 +110,16 @@ class TxtIO {
     IMUProcessFuncType imu_proc_;
     OdomProcessFuncType odom_proc_;
     GNSSProcessFuncType gnss_proc_;
+    NZZProcessFuncType nzz_proc_;
+    GPSWithTimeKeyProcessFuncType gps_timekey_proc_;
 
     /// IMU数据组合相关
     PendingAccData pending_acc_;
     PendingGyrData pending_gyr_;
     static constexpr double TIME_SYNC_THRESHOLD = 0.05; // 50ms同步阈值
+
+    /// NZZ数据去重相关
+    std::set<std::string> processed_nzz_times_; // 已处理的NZZ时间，用于去重
 };
 
 // 注释掉RosbagIO类，因为它依赖ROS

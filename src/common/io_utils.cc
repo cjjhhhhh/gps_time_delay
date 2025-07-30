@@ -40,6 +40,8 @@ void TxtIO::Go() {
             ProcessACC(ss);
         } else if (data_type == "$GYR" && imu_proc_) {
             ProcessGYR(ss);
+        } else if (data_type == "$NZZ" && nzz_proc_) {
+            ProcessNZZ(ss);
         } else if (data_type == "IMU" && imu_proc_) {
             // 保持对原格式的兼容
             double time, gx, gy, gz, ax, ay, az;
@@ -65,6 +67,7 @@ void TxtIO::Go() {
 void TxtIO::ProcessGPS(std::stringstream& ss) {
     // GPS格式：时间戳、WGS84经纬度、航向、速度、高度、定位状态
     // 字段索引：1=时间戳, 7=经度_wgs84, 8=纬度_wgs84, 9=航向, 10=速度, 11=高度, 12=GPS状态
+    // 时间字段：19=年, 20=月, 21=日, 22=时, 23=分, 24=秒
     std::vector<std::string> fields;
     std::string field;
     
@@ -73,8 +76,8 @@ void TxtIO::ProcessGPS(std::stringstream& ss) {
         fields.push_back(field);
     }
     
-    if (fields.size() < 13) {
-        LOG(WARNING) << "GPS数据字段不足，需要至少13个字段，实际：" << fields.size();
+    if (fields.size() < 25) {  // 需要包含时间字段
+        LOG(WARNING) << "GPS数据字段不足，需要至少25个字段，实际：" << fields.size();
         return;
     }
     
@@ -97,13 +100,86 @@ void TxtIO::ProcessGPS(std::stringstream& ss) {
         
         // 解析GPS状态
         bool gps_valid = (fields[11] == "A");
+        bool heading_valid = true;
         
         // 创建GNSS数据
         Vec3d lat_lon_alt(latitude_wgs84, longitude_wgs84, altitude);
-        gnss_proc_(GNSS(timestamp, gps_valid ? 4 : 0, lat_lon_alt, heading, gps_valid));
+        GNSS gnss_data(timestamp, gps_valid ? 4 : 0, lat_lon_alt, heading, heading_valid);
+        
+        // 调用原有的GNSS回调
+        if (gnss_proc_) {
+            gnss_proc_(gnss_data);
+        }
+        
+        // 如果需要GPS+时间字符串匹配，提取时间字符串并调用对应回调
+        if (gps_timekey_proc_) {
+            // 提取GPS时间：年月日时分秒
+            int year = std::stoi(fields[18]);   // 字段19-1=18
+            int month = std::stoi(fields[19]);  // 字段20-1=19  
+            int day = std::stoi(fields[20]);    // 字段21-1=20
+            int hour = std::stoi(fields[21]);   // 字段22-1=21
+            int minute = std::stoi(fields[22]); // 字段23-1=22
+            int second = std::stoi(fields[23]); // 字段24-1=23
+            
+            // 构造时间字符串键，格式与NZZ一致："2025-6-12 11:22:27"
+            std::string time_key = std::to_string(year) + "-" + std::to_string(month) + "-" + std::to_string(day) + 
+                                  " " + std::to_string(hour) + ":" + std::to_string(minute) + ":" + std::to_string(second);
+            
+            GPSWithTimeKey gps_with_timekey(gnss_data, time_key);
+            gps_timekey_proc_(gps_with_timekey);
+        }
         
     } catch (const std::exception& e) {
         LOG(WARNING) << "解析GPS数据失败: " << e.what();
+    }
+}
+
+void TxtIO::ProcessNZZ(std::stringstream& ss) {
+    // NZZ格式：$NZZ 2025-6-12 11:22:27 ... 271.862000 ...
+    // 注意：$NZZ已经在Go()中被读取，所以这里：
+    // fields[0] = 2025-6-12 (日期)
+    // fields[1] = 11:22:27  (时间)
+    // fields[11] = 271.862000 (航向角，对应Python中的fields[12])
+    
+    std::vector<std::string> fields;
+    std::string field;
+    
+    // 读取所有字段
+    while (ss >> field) {
+        fields.push_back(field);
+    }
+    
+    if (fields.size() < 12) {  // 需要至少12个字段才能访问fields[11]
+        LOG(WARNING) << "NZZ数据字段不足，需要至少12个字段，实际：" << fields.size();
+        return;
+    }
+    
+    try {
+        // 解析时间：fields[0] = 日期(2025-6-12), fields[1] = 时间(11:22:27)
+        std::string date_str = fields[0];  // 2025-6-12
+        std::string time_str = fields[1];  // 11:22:27
+        
+        // 构建时间字符串键，用于与GPS匹配
+        std::string time_key = date_str + " " + time_str;  // "2025-6-12 11:22:27"
+        
+        // 去重：每秒只保留第一个NZZ数据（模仿Python逻辑）
+        if (processed_nzz_times_.find(time_key) != processed_nzz_times_.end()) {
+            // 该时间已处理过，跳过
+            return;
+        }
+        
+        // 标记该时间已处理
+        processed_nzz_times_.insert(time_key);
+        
+        // 解析航向角（对应Python中的fields[12]，但这里是fields[11]因为$NZZ已被读取）
+        double heading = std::stod(fields[11]);
+        
+        // 创建NZZ数据并调用回调
+        NZZ nzz_data(time_key, heading);
+        nzz_proc_(nzz_data);
+        
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "解析NZZ数据失败: " << e.what();
     }
 }
 

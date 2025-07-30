@@ -5,6 +5,7 @@
 #include "ch3/eskf.hpp"
 #include "common/io_utils.h"
 #include "utm_convert.h"
+#include "turn_detector.h"
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -15,8 +16,9 @@
 #include <queue>
 
 DEFINE_string(txt_path, "/Users/cjj/Data/vdr_plog/Honor_V40/vdr_20250523_162014_895.log", "数据文件路径");
-DEFINE_bool(offline_mode, false, "是否使用离线重组织模式");
+DEFINE_bool(offline_mode, false, "是否使用离线重组织模式，同时使用转弯检测");
 DEFINE_double(gps_time_offset, 0.0, "GPS时间偏移");
+DEFINE_bool(enable_turn_detection, true, "是否启用转弯检测（仅在离线模式下有效）");  // 新增，默认开启
 
 //时间戳数据结构
 struct TimeStampedData {
@@ -74,7 +76,47 @@ private:
     std::vector<TimeStampedData> all_data_;
     double gps_time_offset_ = 0.0;
 
+    // 新增：GPS-NZZ匹配结果存储
+    std::vector<std::pair<double, double>> matched_heading_data_; // (gps_timestamp, nzz_heading)
+
 public:
+
+    //读取所有数据
+    bool ReadAllData(const std::string& file_path,
+                    std::vector<sad::IMU>& imu_data,
+                    std::vector<sad::GNSS>& gps_data) {
+                        
+        // 新增：收集GPS-NZZ匹配数据
+        std::vector<sad::GPSWithTimeKey> gps_with_timekey;
+        std::vector<sad::NZZ> nzz_data;
+
+        sad::TxtIO io(file_path);
+        io.SetIMUProcessFunc([&](const sad::IMU& imu){
+            imu_data.push_back(imu);
+        }).SetGNSSProcessFunc([&](const sad::GNSS& gps){
+            gps_data.push_back(gps);
+        }).SetGPSWithTimeKeyProcessFunc([&](const sad::GPSWithTimeKey& gps_timekey){
+            gps_with_timekey.push_back(gps_timekey);
+        }).SetNZZProcessFunc([&](const sad::NZZ& nzz){
+            nzz_data.push_back(nzz);
+        });
+
+        io.Go();
+
+        LOG(INFO) << "数据读取完成: GPS=" << gps_with_timekey.size() 
+                  << ", NZZ=" << nzz_data.size();
+        
+        // 新增：进行GPS-NZZ匹配
+        MatchGPSNZZData(gps_with_timekey, nzz_data);
+
+        return !imu_data.empty() && !gps_data.empty();
+     }
+
+    // 新增：获取匹配的航向数据
+    const std::vector<std::pair<double, double>>& GetMatchedHeadingData() const {
+        return matched_heading_data_;
+    }
+
     void SetGPSTimeOffset(double offset) {
         gps_time_offset_ = offset;
         LOG(INFO) << "设置GPS时间偏移" << offset << "s";
@@ -105,22 +147,138 @@ public:
     }
 
 private:
-    //读取所有数据
-    bool ReadAllData(const std::string& file_path,
-                    std::vector<sad::IMU>& imu_data,
-                    std::vector<sad::GNSS>& gps_data) {
-                        
-        sad::TxtIO io(file_path);
-        io.SetIMUProcessFunc([&](const sad::IMU& imu){
-            imu_data.push_back(imu);
-        }).SetGNSSProcessFunc([&](const sad::GNSS& gps){
-            gps_data.push_back(gps);
-        });
 
-        io.Go();
 
-        return !imu_data.empty() && !gps_data.empty();
-     }
+    // 新增：GPS-NZZ匹配方法 - 对应Python的match_gps_nzz_data
+    void MatchGPSNZZData(const std::vector<sad::GPSWithTimeKey>& gps_data,
+                         const std::vector<sad::NZZ>& nzz_data) {
+        matched_heading_data_.clear();
+        
+        LOG(INFO) << "开始GPS-NZZ数据匹配...";
+        
+        int direct_matches = 0;
+        int fuzzy_matches = 0;
+        
+        for (const auto& gps : gps_data) {
+            bool found_match = false;
+            
+            // 1. 直接匹配
+            for (const auto& nzz : nzz_data) {
+                if (gps.time_key_ == nzz.time_key_) {
+                    // 应用GPS时间偏移
+                    double adjusted_gps_time = gps.gnss_data_.unix_time_ + gps_time_offset_;
+                    matched_heading_data_.emplace_back(adjusted_gps_time, nzz.heading_);
+                    found_match = true;
+                    direct_matches++;
+                    break;
+                }
+            }
+            
+            // 2. 如果直接匹配失败，尝试模糊匹配
+            if (!found_match) {
+                std::string gps_normalized = NormalizeTimeKey(gps.time_key_);
+                
+                for (const auto& nzz : nzz_data) {
+                    std::string nzz_normalized = NormalizeTimeKey(nzz.time_key_);
+                    
+                    if (gps_normalized == nzz_normalized) {
+                        double adjusted_gps_time = gps.gnss_data_.unix_time_ + gps_time_offset_;
+                        matched_heading_data_.emplace_back(adjusted_gps_time, nzz.heading_);
+                        found_match = true;
+                        fuzzy_matches++;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 按时间戳排序
+        std::sort(matched_heading_data_.begin(), matched_heading_data_.end(),
+                  [](const std::pair<double, double>& a, const std::pair<double, double>& b) {
+                      return a.first < b.first;
+                  });
+        
+        LOG(INFO) << "GPS-NZZ匹配完成:";
+        LOG(INFO) << "  直接匹配: " << direct_matches << " 个";
+        LOG(INFO) << "  模糊匹配: " << fuzzy_matches << " 个";
+        LOG(INFO) << "  总匹配数: " << matched_heading_data_.size() << " 个";
+    }
+    
+    // 新增：标准化时间字符串格式 - 对应Python的normalize_time_key
+    std::string NormalizeTimeKey(const std::string& time_key) const {
+        try {
+            // 检查格式：应该包含 '-' 和 ':'
+            if (time_key.find('-') == std::string::npos || 
+                time_key.find(':') == std::string::npos) {
+                return time_key;
+            }
+            
+            // 分离日期和时间部分
+            size_t space_pos = time_key.find(' ');
+            if (space_pos == std::string::npos) {
+                return time_key;
+            }
+            
+            std::string date_part = time_key.substr(0, space_pos);
+            std::string time_part = time_key.substr(space_pos + 1);
+            
+            // 处理日期部分：YYYY-M-D -> YYYY-MM-DD
+            std::string normalized_date = NormalizeDatePart(date_part);
+            
+            // 处理时间部分：H:M:S -> HH:MM:SS
+            std::string normalized_time = NormalizeTimePart(time_part);
+            
+            return normalized_date + " " + normalized_time;
+            
+        } catch (const std::exception& e) {
+            LOG(WARNING) << "时间字符串标准化失败: " << time_key << ", 错误: " << e.what();
+            return time_key;
+        }
+    }
+    
+    // 新增：标准化日期部分
+    std::string NormalizeDatePart(const std::string& date_str) const {
+        std::vector<std::string> parts;
+        std::stringstream ss(date_str);
+        std::string item;
+        
+        while (std::getline(ss, item, '-')) {
+            parts.push_back(item);
+        }
+        
+        if (parts.size() != 3) {
+            return date_str;
+        }
+        
+        // 补零：YYYY-MM-DD
+        std::string year = parts[0];
+        std::string month = (parts[1].length() == 1) ? "0" + parts[1] : parts[1];
+        std::string day = (parts[2].length() == 1) ? "0" + parts[2] : parts[2];
+        
+        return year + "-" + month + "-" + day;
+    }
+    
+    // 新增：标准化时间部分
+    std::string NormalizeTimePart(const std::string& time_str) const {
+        std::vector<std::string> parts;
+        std::stringstream ss(time_str);
+        std::string item;
+        
+        while (std::getline(ss, item, ':')) {
+            parts.push_back(item);
+        }
+        
+        if (parts.size() != 3) {
+            return time_str;
+        }
+        
+        // 补零：HH:MM:SS
+        std::string hour = (parts[0].length() == 1) ? "0" + parts[0] : parts[0];
+        std::string minute = (parts[1].length() == 1) ? "0" + parts[1] : parts[1];
+        std::string second = (parts[2].length() == 1) ? "0" + parts[2] : parts[2];
+        
+        return hour + ":" + minute + ":" + second;
+    }
 
      void ConvertToTimeStampedData(const std::vector<sad::IMU>& imu_data,
                                    const std::vector<sad::GNSS>& gps_data) {
@@ -146,6 +304,16 @@ private:
     std::ofstream correction_file_; // 位置修正量
     std::ofstream lateral_residual_file_; // 横向残差
 
+    // 新增：GPS-NZZ匹配数据存储
+    struct MatchedGPSNZZ {
+        double gps_timestamp;
+        double nzz_heading;
+        std::string time_key;
+        
+        MatchedGPSNZZ(double gps_ts, double heading, const std::string& key)
+            : gps_timestamp(gps_ts), nzz_heading(heading), time_key(key) {}
+    };
+
 public:
     //初始化ESKF
     bool Initialize(const std::string& correction_output_path) {
@@ -162,6 +330,7 @@ public:
         if(!lateral_residual_file_.is_open()){
             return false;
         }
+
         return true;
     }
 
@@ -282,6 +451,11 @@ private:
 //离线模式
 int RunOfflineMode() {
     LOG(INFO) << "离线模式";
+    if (FLAGS_enable_turn_detection) {
+        LOG(INFO) << "转弯检测: 启用";
+    } else {
+        LOG(INFO) << "转弯检测: 关闭";
+    }
     LOG(INFO) << "GPS时间偏移" << FLAGS_gps_time_offset << "s";
     
     //数据管理器
@@ -317,7 +491,50 @@ int RunOfflineMode() {
         LOG(ERROR) << "数据处理失败";
         return -1;
     }
-    
+
+    // 可选的转弯检测
+    if (FLAGS_enable_turn_detection) {
+        LOG(INFO) << "开始转弯检测分析...";
+        
+        // 获取GPS-NZZ匹配数据
+        const auto& matched_data = data_manager.GetMatchedHeadingData();
+        
+        if (matched_data.empty()) {
+            LOG(WARNING) << "没有匹配的GPS-NZZ数据，跳过转弯检测";
+        } else {
+            // 转弯检测器配置
+            TurnDetector turn_detector;
+            TurnDetector::Config config;
+            config.start_turn_rate_threshold = 3.0;
+            config.end_turn_rate_threshold = 1.5;
+            config.end_duration_threshold = 3.0;
+            config.accumulated_angle_threshold = 30.0;
+            
+            // 转弯检测输出文件名
+            std::string turn_output_filename = "turns_offline";
+            if (FLAGS_gps_time_offset != 0.0) {
+                int offset_ms = static_cast<int>(FLAGS_gps_time_offset * 1000);
+                turn_output_filename += "_" + std::to_string(offset_ms) + "ms";
+            }
+            turn_output_filename += ".txt";
+            
+            if (!turn_detector.Initialize(turn_output_filename, config)) {
+                LOG(ERROR) << "转弯检测器初始化失败";
+                return -1;
+            }
+            
+            // 添加匹配的航向数据进行转弯检测
+            for (const auto& data : matched_data) {
+                turn_detector.AddHeadingData(data.first, data.second);
+            }
+            
+            // 完成转弯检测
+            turn_detector.Finalize();
+            
+            LOG(INFO) << "转弯检测分析完成";
+        }
+    }
+
     return 0;
 }
 
