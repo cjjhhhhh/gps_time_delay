@@ -1,2 +1,0 @@
-/usr/bin/ar qc libminimal_slam_common.a CMakeFiles/minimal_slam_common.dir/io_utils.cc.o CMakeFiles/minimal_slam_common.dir/timer/timer.cc.o
-/usr/bin/ranlib libminimal_slam_common.a

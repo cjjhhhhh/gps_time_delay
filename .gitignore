@@ -1,0 +1,10 @@
+# 编译输出目录
+build/
+bin/
+
+# macOS 系统文件
+.DS_Store
+
+# 其他常见的临时文件
+*.o
+*.out
