@@ -59,7 +59,7 @@ struct GNSS {
     GpsStatusType status_ = GpsStatusType::GNSS_NOT_EXIST;  // GNSS 状态位
     Vec3d lat_lon_alt_ = Vec3d::Zero();                     // 经度、纬度、高度，前二者单位为度
     double heading_ = 0.0;                                  // 双天线读到的方位角，单位为度
-    bool heading_valid_ = false;                            // 方位角是否有效
+    bool heading_valid_ = true;                            // 方位角是否有效
 
     UTMCoordinate utm_;       // UTM 坐标（区域之类的也在内）
     bool utm_valid_ = false;  // UTM 坐标是否已经计算（若经纬度给出错误数值，此处也为false）
