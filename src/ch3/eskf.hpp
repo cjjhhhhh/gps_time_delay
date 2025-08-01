@@ -17,6 +17,17 @@
 
 namespace sad {
 
+/// FBK安装角
+struct FBKInstallationData {
+    double timestamp_;  // 时间戳（秒）
+    double pitch_;      // pitch角（度）
+    double heading_;    // heading角（度）
+    
+    FBKInstallationData() = default;
+    FBKInstallationData(double timestamp, double pitch, double heading) 
+        : timestamp_(timestamp), pitch_(pitch), heading_(heading) {}
+};
+
 /**
  * 书本第3章介绍的误差卡尔曼滤波器
  * 可以指定观测GNSS的读数，GNSS应该事先转换到车体坐标系
@@ -57,8 +68,8 @@ class ESKF {
 
         //手机安装角参数
         double phone_roll_install_ = 0.0 * math::kDEG2RAD;
-        double phone_pitch_install_ = (90 + (-19.549240)) * math::kDEG2RAD;
-        double phone_heading_install_ = -1.584286 * math::kDEG2RAD;
+        double phone_pitch_install_ = 90.0 * math::kDEG2RAD; //默认值
+        double phone_heading_install_ = 0.0 * math::kDEG2RAD; //默认值
 
         /// 时间延迟补偿参数
         bool enable_time_compensation_ = false;  // 是否启用时间补偿
@@ -98,7 +109,7 @@ class ESKF {
     /// 使用GPS观测
     bool ObserveGps(const GNSS& gnss);
 
-    /// 新增：仅观测位置，不观测航向
+    /// 仅观测位置，不观测航向
     bool ObservePositionOnly(const GNSS& gnss);
 
     /**
@@ -110,7 +121,7 @@ class ESKF {
      */
     bool ObserveSE3(const SE3& pose, double trans_noise = 3.0, double ang_noise = 3.0 * math::kDEG2RAD);
 
-    /// 新增：仅观测位置部分
+    /// 仅观测位置部分
     bool ObservePositionOnly(const SE3& pose, double trans_noise = 3.0);
 
     /// accessors
@@ -151,26 +162,75 @@ class ESKF {
                   << ", delay = " << delay << "s";
     }
 
-void SaveCovariance(std::ofstream& cov_file) const {
-    cov_file << std::setprecision(18) << current_time_ << " ";
-    
-    // 保存18个对角元素
-    for (int i = 0; i < 18; ++i) {
-        cov_file << std::setprecision(9) << cov_(i, i) << " ";
+    /// 添加FBK安装角数据
+    void AddFBKData(double timestamp, double pitch, double heading) {
+        fbk_data_list_.emplace_back(timestamp, pitch, heading);
     }
-    cov_file << std::endl;
-}
 
-double GetCurrentHeading() const {
-    return atan2(R_.matrix()(1, 0), R_.matrix()(0, 0));
-}
+    /// 根据GPS时间戳自动设置安装角
+    void SetInstallationAnglesByGPSTime(double gps_timestamp) {
+        if (installation_angles_set_) {
+            return; // 已经设置过了
+        }
+        
+        if (fbk_data_list_.empty()) {
+            LOG(WARNING) << "没有FBK数据，使用默认安装角";
+            installation_angles_set_ = true;
+            return;
+        }
+        
+        // 找到最接近GPS时间戳的FBK数据
+        double min_time_diff = std::numeric_limits<double>::max();
+        const FBKInstallationData* best_match = nullptr;
+        
+        for (const auto& fbk_data : fbk_data_list_) {
+            double time_diff = std::abs(fbk_data.timestamp_ - gps_timestamp);
+            if (time_diff < min_time_diff) {
+                min_time_diff = time_diff;
+                best_match = &fbk_data;
+            }
+        }
+        
+        if (best_match != nullptr) {
+            // 设置安装角参数
+            options_.phone_pitch_install_ = (90.0 + best_match->pitch_) * math::kDEG2RAD;
+            options_.phone_heading_install_ = best_match->heading_ * math::kDEG2RAD;
+            
+            // 重新构建安装角转换矩阵
+            BuildPhoneInstallMatrix();
+            
+            installation_angles_set_ = true;
+            
+            LOG(INFO) << "自动设置安装角 (GPS时间戳: " << gps_timestamp << "s):";
+            LOG(INFO) << "  最佳匹配FBK时间戳: " << best_match->timestamp_ << "s (时间差: " << min_time_diff << "s)";
+            LOG(INFO) << "  Pitch: " << best_match->pitch_ << "° (安装角: " << (90.0 + best_match->pitch_) << "°)";
+            LOG(INFO) << "  Heading: " << best_match->heading_ << "° (安装角: " << best_match->heading_ << "°)";
+        } else {
+            LOG(WARNING) << "未找到匹配的FBK数据，使用默认安装角";
+            installation_angles_set_ = true;
+        }
+    }
 
-double ComputeLateralResidual(const Vec3d& utm_residual) const {
-    double heading = GetCurrentHeading();
-    double dis_e = utm_residual.x(); // 东向残差
-    double dis_n = utm_residual.y(); // 北向残差
-    return dis_e * cos(heading) - dis_n * sin(heading);
-}
+    void SaveCovariance(std::ofstream& cov_file) const {
+        cov_file << std::setprecision(18) << current_time_ << " ";
+        
+        // 保存18个对角元素
+        for (int i = 0; i < 18; ++i) {
+            cov_file << std::setprecision(9) << cov_(i, i) << " ";
+        }
+        cov_file << std::endl;
+    }
+
+    double GetCurrentHeading() const {
+        return atan2(R_.matrix()(1, 0), R_.matrix()(0, 0));
+    }
+
+    double ComputeLateralResidual(const Vec3d& utm_residual) const {
+        double heading = GetCurrentHeading();
+        double dis_e = utm_residual.x(); // 东向残差
+        double dis_n = utm_residual.y(); // 北向残差
+        return dis_e * cos(heading) - dis_n * sin(heading);
+    }
    private:
 
     void Euler2Cbn(double roll, double pitch, double heading, Mat3T &Cbn) {
@@ -209,8 +269,24 @@ double ComputeLateralResidual(const Vec3d& utm_residual) const {
         VecT body_acce = C_phone_to_body_ * imu.acce_;
         VecT body_gyro = C_phone_to_body_ * imu.gyro_;
 
-        double body_z_accel = body_acce[2];
-        // LOG(INFO) << "Z轴加速度: " << body_z_accel << " m/s² (理论值应接近±9.8)";
+        if (!body_acce_file_initialized_) {
+            body_acce_file_.open("body_acce.txt");
+            if (body_acce_file_.is_open()) {
+                // 写入文件头
+                body_acce_file_ << "# timestamp acce_x acce_y acce_z (m/s²)" << std::endl;
+                body_acce_file_initialized_ = true;
+            }
+        }
+
+        // 记录加速度数据到文件
+        if (body_acce_file_.is_open()) {
+            body_acce_file_ << std::fixed << std::setprecision(9) 
+                            << imu.timestamp_ << " "
+                            << body_acce[0] << " " 
+                            << body_acce[1] << " " 
+                            << body_acce[2] << std::endl;
+        }
+
 
         corrected_imu.acce_ = body_acce;
         corrected_imu.gyro_ = body_gyro;
@@ -310,6 +386,13 @@ double ComputeLateralResidual(const Vec3d& utm_residual) const {
 
     /// 配置项
     Options options_;
+
+    /// FBK安装角数据存储
+    std::vector<FBKInstallationData> fbk_data_list_;  // 存储所有FBK数据
+    bool installation_angles_set_;                     // 安装角是否已设置
+
+    mutable std::ofstream body_acce_file_;  // 使用mutable因为ApplyPhoneInstallCorrection是const函数
+    mutable bool body_acce_file_initialized_ = false;
 };
 
 using ESKFD = ESKF<double>;
@@ -379,8 +462,11 @@ bool ESKF<S>::ObserveGps(const GNSS& gnss) {
     //     return false;
     // }
 
-    //首次GNSS的话直接设置初始位姿
+    //首次GNSS的话直接设置初始位姿和安装角
     if (first_gnss_) {
+        // 根据GPS时间戳自动设置安装角
+        SetInstallationAnglesByGPSTime(gnss.unix_time_);
+
         double initial_yaw_rad = atan2(gnss.utm_pose_.so3().matrix()(1, 0), 
                                       gnss.utm_pose_.so3().matrix()(0, 0));
         double initial_yaw_deg = initial_yaw_rad * 180.0 / M_PI;

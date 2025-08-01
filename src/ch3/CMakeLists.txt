@@ -20,6 +20,7 @@ add_executable(run_eskf_gins
     run_eskf_gins.cc
     static_imu_init.cc
     utm_convert.cc
+    turn_detector.cc
     ${PROJECT_SOURCE_DIR}/thirdparty/utm_convert/utm.cc
     ${PROJECT_SOURCE_DIR}/thirdparty/utm_convert/tranmerc.cc
 )

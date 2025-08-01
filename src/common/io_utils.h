@@ -38,6 +38,33 @@ struct GPSWithTimeKey {
         : gnss_data_(gnss), time_key_(time_key) {}
 };
 
+/// FBK Flag数据结构
+struct FBKFlag {
+    double timestamp_;  // 时间戳（从字段3获取，毫秒转秒）
+    
+    FBKFlag() = default;
+    FBKFlag(double timestamp) : timestamp_(timestamp) {}
+};
+
+/// FBK Misalignment数据结构
+struct FBKMisalignment {
+    double pitch_;    // pitch角（度）
+    double heading_;  // heading角（度）
+    
+    FBKMisalignment() = default;
+    FBKMisalignment(double pitch, double heading) : pitch_(pitch), heading_(heading) {}
+};
+
+/// FBK完整数据对（Flag + Misalignment）
+struct FBKPair {
+    FBKFlag flag_;
+    FBKMisalignment misalignment_;
+    bool valid_;  // 是否有效（flag和misalignment都存在）
+    
+    FBKPair() : valid_(false) {}
+    FBKPair(const FBKFlag& flag, const FBKMisalignment& misalignment) 
+        : flag_(flag), misalignment_(misalignment), valid_(true) {}
+};
 
 /**
  * 读取本书提供的数据文本文件，并调用回调函数
@@ -53,6 +80,7 @@ class TxtIO {
     using GNSSProcessFuncType = std::function<void(const GNSS &)>;
     using NZZProcessFuncType = std::function<void(const NZZ &)>;
     using GPSWithTimeKeyProcessFuncType = std::function<void(const GPSWithTimeKey &)>;
+    using FBKPairProcessFuncType = std::function<void(const FBKPair &)>;
 
     TxtIO &SetIMUProcessFunc(IMUProcessFuncType imu_proc) {
         imu_proc_ = std::move(imu_proc);
@@ -79,6 +107,10 @@ class TxtIO {
         return *this;
     }
 
+    TxtIO &SetFBKPairProcessFunc(FBKPairProcessFuncType fbk_proc) {
+        fbk_proc_ = std::move(fbk_proc);
+        return *this;
+    }
 
     // 遍历文件内容，调用回调函数
     void Go();
@@ -102,6 +134,7 @@ class TxtIO {
     void ProcessACC(std::stringstream& ss);
     void ProcessGYR(std::stringstream& ss);
     void ProcessNZZ(std::stringstream& ss);
+    void ProcessFBK(std::stringstream& ss);
 
     /// 尝试组合IMU数据
     void TryCreateIMU();
@@ -112,6 +145,7 @@ class TxtIO {
     GNSSProcessFuncType gnss_proc_;
     NZZProcessFuncType nzz_proc_;
     GPSWithTimeKeyProcessFuncType gps_timekey_proc_;
+    FBKPairProcessFuncType fbk_proc_;
 
     /// IMU数据组合相关
     PendingAccData pending_acc_;
@@ -120,6 +154,10 @@ class TxtIO {
 
     /// NZZ数据去重相关
     std::set<std::string> processed_nzz_times_; // 已处理的NZZ时间，用于去重
+
+    /// FBK数据处理相关
+    FBKFlag pending_flag_;          // 待匹配的flag数据
+    bool pending_flag_valid_;       // flag数据是否有效
 };
 
 // 注释掉RosbagIO类，因为它依赖ROS

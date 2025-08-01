@@ -79,6 +79,9 @@ private:
     // 新增：GPS-NZZ匹配结果存储
     std::vector<std::pair<double, double>> matched_heading_data_; // (gps_timestamp, nzz_heading)
 
+    // 新增：FBK数据存储
+    std::vector<sad::FBKPair> fbk_data_;
+
 public:
 
     //读取所有数据
@@ -90,6 +93,9 @@ public:
         std::vector<sad::GPSWithTimeKey> gps_with_timekey;
         std::vector<sad::NZZ> nzz_data;
 
+        // 新增：收集FBK数据
+        std::vector<sad::FBKPair> fbk_data;
+
         sad::TxtIO io(file_path);
         io.SetIMUProcessFunc([&](const sad::IMU& imu){
             imu_data.push_back(imu);
@@ -99,22 +105,30 @@ public:
             gps_with_timekey.push_back(gps_timekey);
         }).SetNZZProcessFunc([&](const sad::NZZ& nzz){
             nzz_data.push_back(nzz);
+        }).SetFBKPairProcessFunc([&](const sad::FBKPair& fbk_pair){  // 新增
+            fbk_data.push_back(fbk_pair);
         });
 
         io.Go();
 
         LOG(INFO) << "数据读取完成: GPS=" << gps_with_timekey.size() 
-                  << ", NZZ=" << nzz_data.size();
+                  << ", NZZ=" << nzz_data.size() << ", FBK=" << fbk_data.size();
         
         // 新增：进行GPS-NZZ匹配
         MatchGPSNZZData(gps_with_timekey, nzz_data);
 
+        fbk_data_ = fbk_data;
         return !imu_data.empty() && !gps_data.empty();
      }
 
     // 新增：获取匹配的航向数据
     const std::vector<std::pair<double, double>>& GetMatchedHeadingData() const {
         return matched_heading_data_;
+    }
+
+    // 新增：获取FBK数据
+    const std::vector<sad::FBKPair>& GetFBKData() const {
+        return fbk_data_;
     }
 
     void SetGPSTimeOffset(double offset) {
@@ -397,6 +411,18 @@ public:
         LOG(INFO) << "设置转弯段信息: " << turn_segments_.size() << " 个转弯段";
     }
 
+    // 新增：设置FBK数据
+    void SetFBKData(const std::vector<sad::FBKPair>& fbk_data) {
+        for (const auto& fbk_pair : fbk_data) {
+            if (fbk_pair.valid_) {
+                eskf_.AddFBKData(fbk_pair.flag_.timestamp_, 
+                                fbk_pair.misalignment_.pitch_, 
+                                fbk_pair.misalignment_.heading_);
+            }
+        }
+        LOG(INFO) << "设置FBK数据: " << fbk_data.size() << " 个FBK数据对";
+    }
+
 private:
     bool ProcessIMU(const sad::IMU& imu, std::ofstream& cov_file) {
         //等待第一个GPS
@@ -509,6 +535,12 @@ int RunOfflineMode() {
     if (!processor.Initialize(correction_path_)) {
         LOG(ERROR) << "ESKF初始化失败";
         return -1;
+    }
+
+    // 设置FBK数据到处理器
+    const auto& fbk_data = data_manager.GetFBKData();
+    if (!fbk_data.empty()) {
+        processor.SetFBKData(fbk_data);
     }
 
     // 转弯检测
@@ -750,6 +782,17 @@ int RunRealtimeMode() {
 
             
             LOG(INFO) << "=== GPS处理结束 ===";
+        })
+
+        .SetFBKPairProcessFunc([&](const sad::FBKPair& fbk_pair) {
+            if (fbk_pair.valid_) {
+                eskf.AddFBKData(fbk_pair.flag_.timestamp_, 
+                            fbk_pair.misalignment_.pitch_, 
+                            fbk_pair.misalignment_.heading_);
+                LOG(INFO) << "添加FBK数据: t=" << fbk_pair.flag_.timestamp_ << "s, "
+                        << "pitch=" << fbk_pair.misalignment_.pitch_ << "°, "
+                        << "heading=" << fbk_pair.misalignment_.heading_ << "°";
+            }
         })
         .Go();
 

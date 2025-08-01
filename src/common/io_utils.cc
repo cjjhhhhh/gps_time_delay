@@ -42,6 +42,8 @@ void TxtIO::Go() {
             ProcessGYR(ss);
         } else if (data_type == "$NZZ" && nzz_proc_) {
             ProcessNZZ(ss);
+        } else if (data_type == "$FBK" && fbk_proc_) {
+            ProcessFBK(ss);
         } else if (data_type == "IMU" && imu_proc_) {
             // 保持对原格式的兼容
             double time, gx, gy, gz, ax, ay, az;
@@ -180,6 +182,124 @@ void TxtIO::ProcessNZZ(std::stringstream& ss) {
         
     } catch (const std::exception& e) {
         LOG(WARNING) << "解析NZZ数据失败: " << e.what();
+    }
+}
+
+void TxtIO::ProcessFBK(std::stringstream& ss) {
+    // FBK数据有两种格式：
+    // flag行：$FBK flag,1,164385368,-0.153193,0.030816,...（逗号分隔）
+    // misalignment行：$FBK misalignment pitch:-18.122493 heading:1.800880（空格分隔）
+    
+    std::string full_line;
+    std::getline(ss, full_line);
+    
+    // 去除前后空格
+    full_line.erase(0, full_line.find_first_not_of(" \t"));
+    full_line.erase(full_line.find_last_not_of(" \t") + 1);
+    
+    if (full_line.empty()) {
+        LOG(WARNING) << "FBK数据为空";
+        return;
+    }
+    
+    try {
+        // 判断是flag行还是misalignment行
+        if (full_line.find("flag") == 0) {
+            // flag行：使用逗号分隔
+            std::vector<std::string> fields;
+            std::stringstream line_ss(full_line);
+            std::string field;
+            
+            while (std::getline(line_ss, field, ',')) {
+                // 去除前后空格
+                field.erase(0, field.find_first_not_of(" \t"));
+                field.erase(field.find_last_not_of(" \t") + 1);
+                fields.push_back(field);
+            }
+            
+            if (fields.size() < 3) {
+                LOG(WARNING) << "FBK flag数据字段不足，需要至少3个字段";
+                return;
+            }
+            
+            // 提取时间戳（字段2，毫秒转秒）
+            double timestamp = std::stod(fields[2]) / 1000.0;
+            
+            // 存储flag数据，等待下一行的misalignment
+            pending_flag_ = FBKFlag(timestamp);
+            pending_flag_valid_ = true;
+                        
+        } else if (full_line.find("misalignment") == 0) {
+            // misalignment行：使用空格分隔
+            if (!pending_flag_valid_) {
+                LOG(WARNING) << "收到misalignment但没有对应的flag数据";
+                return;
+            }
+            
+            std::vector<std::string> fields;
+            std::stringstream line_ss(full_line);
+            std::string field;
+            
+            // 按空格分隔
+            while (line_ss >> field) {
+                fields.push_back(field);
+            }
+            
+            if (fields.size() < 2) {
+                LOG(WARNING) << "FBK misalignment数据字段不足";
+                return;
+            }
+            
+            double pitch = 0.0, heading = 0.0;
+            bool pitch_found = false, heading_found = false;
+            
+            // fields[1] 包含 "pitch:-19.279136,heading:-1.083479"
+            // 需要按逗号进一步分割
+            std::string pitch_heading_str = fields[1];
+            std::stringstream ph_ss(pitch_heading_str);
+            std::string ph_field;
+            
+            while (std::getline(ph_ss, ph_field, ',')) {
+                // 去除前后空格
+                ph_field.erase(0, ph_field.find_first_not_of(" \t"));
+                ph_field.erase(ph_field.find_last_not_of(" \t") + 1);
+                
+                if (ph_field.find("pitch:") == 0) {
+                    // 从"pitch:-18.122493"中提取数值
+                    std::string value_str = ph_field.substr(6); // 跳过"pitch:"
+                    pitch = std::stod(value_str);
+                    pitch_found = true;
+                }
+                
+                if (ph_field.find("heading:") == 0) {
+                    // 从"heading:1.800880"中提取数值
+                    std::string value_str = ph_field.substr(8); // 跳过"heading:"
+                    heading = std::stod(value_str);
+                    heading_found = true;
+                }
+            }
+            
+            if (pitch_found && heading_found) {
+                // 创建完整的FBK对并调用回调
+                FBKMisalignment misalignment(pitch, heading);
+                FBKPair fbk_pair(pending_flag_, misalignment);
+                
+                fbk_proc_(fbk_pair);
+                
+                // 重置pending状态
+                pending_flag_valid_ = false;
+            } else {
+                LOG(WARNING) << "FBK misalignment数据解析失败，pitch_found: " << pitch_found 
+                           << ", heading_found: " << heading_found;
+            }
+        } else {
+            // 忽略其他格式的FBK行（如数字开头的行、info行等）
+            // LOG(INFO) << "忽略FBK行: " << full_line.substr(0, 50) << "...";
+            return;
+        }
+        
+    } catch (const std::exception& e) {
+        LOG(WARNING) << "解析FBK数据失败: " << e.what();
     }
 }
 
