@@ -24,30 +24,50 @@ def parse_gps_timestamps(log_file: str) -> List[float]:
     """
     timestamps = []
     
-    try:
-        with open(log_file, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                
-                if line.startswith('$GPS'):
-                    try:
-                        fields = line.split()
-                        if len(fields) >= 25:
-                            # 提取毫秒级时间戳并转换为秒
-                            timestamp = float(fields[1]) / 1000.0
-                            timestamps.append(timestamp)
-                    except Exception as e:
-                        print(f"警告: 第{line_num}行GPS数据解析失败: {e}")
-                        continue
+    # 尝试不同的编码格式
+    encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp1252']
     
-    except FileNotFoundError:
-        print(f"错误: 文件不存在 {log_file}")
-        return []
-    except Exception as e:
-        print(f"错误: 读取文件失败 {e}")
-        return []
+    for encoding in encodings:
+        try:
+            with open(log_file, 'r', encoding=encoding) as f:
+                print(f"使用编码: {encoding}")
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    
+                    if line.startswith('$GPS'):
+                        try:
+                            fields = line.split()
+                            if len(fields) >= 30:
+                                # 这种格式的GPS数据，时间戳在第1个字段（从0开始计数）
+                                # $GPS 4179162243 0 N ... 2025 7 8 15 37 26 ... 1751960246839 4179162245 ...
+                                # 第1个字段是GPS时间戳（毫秒），第-3个字段是另一个时间戳
+                                timestamp = float(fields[1]) / 1000.0
+                                timestamps.append(timestamp)
+                            elif len(fields) >= 25:
+                                # 兼容之前的格式
+                                timestamp = float(fields[1]) / 1000.0
+                                timestamps.append(timestamp)
+                        except Exception as e:
+                            print(f"警告: 第{line_num}行GPS数据解析失败: {e}")
+                            continue
+            break  # 成功读取，跳出循环
+            
+        except UnicodeDecodeError:
+            if encoding == encodings[-1]:  # 最后一个编码也失败
+                print(f"错误: 无法用任何编码读取文件 {log_file}")
+                return []
+            continue  # 尝试下一个编码
+        except FileNotFoundError:
+            print(f"错误: 文件不存在 {log_file}")
+            return []
+        except Exception as e:
+            print(f"错误: 读取文件失败 {e}")
+            return []
     
-    return sorted(timestamps)  # 确保时间序列有序
+    # 去重并排序，确保时间序列有序且无重复
+    unique_timestamps = sorted(list(set(timestamps)))
+    print(f"原始时间戳: {len(timestamps)} 个，去重后: {len(unique_timestamps)} 个")
+    return unique_timestamps
 
 
 def create_timestamp_diff_plot(timestamps: List[float], output_file: str, log_filename: str):

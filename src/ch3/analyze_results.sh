@@ -5,7 +5,7 @@
 # 用法: ./analyze_results.sh [结果目录路径]
 
 # 默认参数设置
-RESULTS_DIR="${1:-/Users/cjj/Data/log_results/XiaoMi11}"
+RESULTS_DIR="${1:-/Users/cjj/Data/log_results/XiaoMi14}"
 
 # 全局变量
 start_time=0
@@ -157,7 +157,7 @@ perform_plot_generation() {
     
     local script_dir=$(dirname "$0")
     
-    # 检查是否至少有一个分析文件（更新文件名检查）
+    # 检查是否至少有一个分析文件
     local has_analysis=false
     
     if [[ -f "$log_dir/turn_rms_analysis.txt" ]] || [[ -f "$log_dir/turn_lateral_analysis.txt" ]] || \
@@ -167,23 +167,17 @@ perform_plot_generation() {
     fi
     
     if [[ "$has_analysis" == false ]]; then
-        echo "跳过绘图: $log_name - 分析文件不存在"
         plot_skipped=$((plot_skipped + 1))
         return 1
     fi
     
-    # 显示执行信息
-    echo "正在为 $log_name 生成RMS曲线图..."
-    echo "执行命令: python3 $script_dir/plot_rms_curves.py --vdr_dir '$log_dir' --log_name '$log_name'"
-    
     # 执行绘图
     if python3 "$script_dir/plot_rms_curves.py" \
         --vdr_dir "$log_dir" \
-        --log_name "$log_name"; then
+        --log_name "$log_name" >/dev/null 2>&1; then
         plot_success=$((plot_success + 1))
         return 0
     else
-        echo "绘图失败，退出码: $?"
         plot_skipped=$((plot_skipped + 1))
         return 1
     fi
@@ -200,7 +194,6 @@ perform_file_analysis() {
     
     # 检查日志目录是否存在
     if [[ ! -d "$log_dir" ]]; then
-        log_warning "跳过分析: 日志目录不存在 - $log_dir"
         pos_rms_skipped=$((pos_rms_skipped + 2))  # 转弯段+整段
         lateral_rms_skipped=$((lateral_rms_skipped + 2))
         plot_skipped=$((plot_skipped + 1))
@@ -210,23 +203,16 @@ perform_file_analysis() {
     local pos_success=false
     local lateral_success=false
     
-    # ========================================
-    # 新增：整段数据RMS分析
-    # ========================================
-    log_info "分析整段数据: $log_name"
-    
-    # 执行整段位置RMS分析（不使用--turns参数）
+    # 执行整段位置RMS分析
     if python3 "$script_dir/auto_pos_rms.py" \
         --log_dir "$log_dir" \
         --log_name "$log_name" \
         --offsets="$offsets" \
-        --output_suffix="_full" ; then
+        --output_suffix="_full" >/dev/null 2>&1; then
         pos_rms_success=$((pos_rms_success + 1))
         pos_success=true
-        log_success "整段位置RMS分析完成"
     else
         pos_rms_skipped=$((pos_rms_skipped + 1))
-        log_warning "整段位置RMS分析失败"
     fi
     
     # 执行整段横向残差RMS分析
@@ -234,36 +220,26 @@ perform_file_analysis() {
         --log_dir "$log_dir" \
         --log_name "$log_name" \
         --offsets="$offsets" \
-        --output_suffix="_full" ; then
+        --output_suffix="_full" >/dev/null 2>&1; then
         lateral_rms_success=$((lateral_rms_success + 1))
         lateral_success=true
-        log_success "整段横向残差RMS分析完成"
     else
         lateral_rms_skipped=$((lateral_rms_skipped + 1))
-        log_warning "整段横向残差RMS分析失败"
     fi
-    
-    # ========================================
-    # 原有：转弯段数据RMS分析
-    # ========================================
     
     # 检查转弯文件是否存在
     if [[ -f "$turns_file" ]]; then
-        log_info "分析转弯段数据: $log_name"
-        
         # 执行转弯段位置RMS分析
         if python3 "$script_dir/auto_pos_rms.py" \
             --log_dir "$log_dir" \
             --turns "$turns_file" \
             --log_name "$log_name" \
             --offsets="$offsets" \
-            --output_suffix="_turns" ; then
+            --output_suffix="_turns" >/dev/null 2>&1; then
             pos_rms_success=$((pos_rms_success + 1))
             pos_success=true
-            log_success "转弯段位置RMS分析完成"
         else
             pos_rms_skipped=$((pos_rms_skipped + 1))
-            log_warning "转弯段位置RMS分析失败"
         fi
         
         # 执行转弯段横向残差RMS分析
@@ -272,16 +248,13 @@ perform_file_analysis() {
             --turns "$turns_file" \
             --log_name "$log_name" \
             --offsets="$offsets" \
-            --output_suffix="_turns" ; then
+            --output_suffix="_turns" >/dev/null 2>&1; then
             lateral_rms_success=$((lateral_rms_success + 1))
             lateral_success=true
-            log_success "转弯段横向残差RMS分析完成"
         else
             lateral_rms_skipped=$((lateral_rms_skipped + 1))
-            log_warning "转弯段横向残差RMS分析失败"
         fi
     else
-        log_warning "跳过转弯段分析: 转弯文件不存在 - $(basename "$turns_file")"
         pos_rms_skipped=$((pos_rms_skipped + 1))
         lateral_rms_skipped=$((lateral_rms_skipped + 1))
     fi
@@ -298,8 +271,6 @@ perform_file_analysis() {
 
 parse_processing_summary() {
     local summary_file="$RESULTS_DIR/processing_summary.txt"
-    
-    log_info "解析处理汇总文件..." >&2
     
     # 临时文件用于收集数据
     local temp_file="/tmp/analyze_results_$$"
@@ -324,12 +295,6 @@ parse_processing_summary() {
             print file ":" offsets
         }
     }' > "$temp_file"
-    
-    # 统计信息
-    local total_files=$(wc -l < "$temp_file" 2>/dev/null || echo "0")
-    local total_success=$(grep "SUCCESS" "$summary_file" 2>/dev/null | wc -l | xargs)
-    
-    log_info "找到 $total_success 个成功处理的记录，涉及 $total_files 个日志文件" >&2
     
     # 输出结果并清理临时文件
     cat "$temp_file"
@@ -364,16 +329,11 @@ run_batch_analysis() {
         # 计算进度
         local progress=$((current_file * 100 / total_files))
         
-        printf "\n${PURPLE}[进度: %d/%d (%d%%)]${NC} 分析文件: %s\n" \
+        printf "${PURPLE}[进度: %d/%d (%d%%)]${NC} %s\n" \
             $current_file $total_files $progress "$log_name"
-        printf "  偏移值: %s\n" "$offsets"
         
         # 执行该文件的RMS分析
         perform_file_analysis "$log_name" "$offsets"
-        
-        # 显示当前统计
-        printf "当前进度: 位置RMS[成功:%d 跳过:%d] 横向残差[成功:%d 跳过:%d] 绘图[成功:%d 跳过:%d]\n" \
-            $pos_rms_success $pos_rms_skipped $lateral_rms_success $lateral_rms_skipped $plot_success $plot_skipped
     done
     
     log_success "按文件批量RMS分析完成"
@@ -395,8 +355,6 @@ generate_optimal_delays_summary() {
         if [[ -d "$log_dir" ]]; then
             local log_name=$(basename "$log_dir")
             
-            echo "DEBUG: 处理目录 $log_name"
-            
             # 定义不同类型的分析文件
             local analysis_types=(
                 "full:turn_rms_analysis_full.txt:turn_lateral_analysis_full.txt:整段轨迹"
@@ -414,10 +372,6 @@ generate_optimal_delays_summary() {
                 local pos_file="$log_dir/$pos_filename"
                 local lateral_file="$log_dir/$lateral_filename"
                 
-                echo "DEBUG: 检查 $type_name 类型文件"
-                echo "DEBUG: 位置文件 $pos_file 存在: $(test -f "$pos_file" && echo "是" || echo "否")"
-                echo "DEBUG: 横向文件 $lateral_file 存在: $(test -f "$lateral_file" && echo "是" || echo "否")"
-                
                 # 检查是否有对应的分析文件
                 if [[ ! -f "$pos_file" ]] && [[ ! -f "$lateral_file" ]]; then
                     continue
@@ -429,7 +383,6 @@ generate_optimal_delays_summary() {
                 
                 # 解析位置RMS分析文件
                 if [[ -f "$pos_file" ]]; then
-                    echo "DEBUG: 开始解析位置RMS文件 ($type_name)"
                     parse_optimal_delays_to_file "$pos_file" "$temp_pos_file"
                 else
                     touch "$temp_pos_file"
@@ -437,7 +390,6 @@ generate_optimal_delays_summary() {
                 
                 # 解析横向残差分析文件
                 if [[ -f "$lateral_file" ]]; then
-                    echo "DEBUG: 开始解析横向残差文件 ($type_name)"
                     parse_optimal_delays_to_file "$lateral_file" "$temp_lateral_file"
                 else
                     touch "$temp_lateral_file"
@@ -445,7 +397,6 @@ generate_optimal_delays_summary() {
                 
                 # 合并结果并写入汇总文件
                 local all_turn_ids=($(cat "$temp_pos_file" "$temp_lateral_file" 2>/dev/null | cut -d',' -f1 | sort -nu))
-                echo "DEBUG: $type_name 类型所有转弯段ID: ${all_turn_ids[*]}"
                 
                 # 为每个转弯段生成汇总行
                 for turn_id in "${all_turn_ids[@]}"; do
@@ -463,7 +414,6 @@ generate_optimal_delays_summary() {
                             segment_desc="转弯段$turn_id"
                         fi
                         
-                        echo "DEBUG: 写入 $type_desc $segment_desc: pos=$pos_delay, lateral=$lateral_delay"
                         echo "$log_name,$type_desc,$segment_desc,$pos_delay,$lateral_delay" >> "$optimal_file"
                         total_entries=$((total_entries + 1))
                     fi
@@ -488,11 +438,7 @@ parse_optimal_delays_to_file() {
     local analysis_file="$1"
     local output_file="$2"
     
-    echo "DEBUG: parse_optimal_delays_to_file - 解析文件 $analysis_file"
-    echo "DEBUG: parse_optimal_delays_to_file - 输出到 $output_file"
-    
     if [[ ! -f "$analysis_file" ]]; then
-        echo "DEBUG: parse_optimal_delays_to_file - 文件不存在"
         return
     fi
     
@@ -502,19 +448,14 @@ parse_optimal_delays_to_file() {
     local current_turn_id=""
     local min_rms=999999
     local optimal_delay=""
-    local line_count=0
     
     while IFS= read -r line; do
-        line_count=$((line_count + 1))
         line=$(echo "$line" | xargs)  # 去除前后空格
         
         # 解析转弯段标题
         if [[ "$line" =~ ^#\ 转弯段\ ([0-9]+)\ \((.+)\)$ ]]; then
-            echo "DEBUG: parse_optimal_delays_to_file - 第${line_count}行匹配转弯段标题: $line"
-            
             # 保存上一个转弯段的结果
             if [[ -n "$current_turn_id" && -n "$optimal_delay" ]]; then
-                echo "DEBUG: parse_optimal_delays_to_file - 保存转弯段 $current_turn_id，最优延迟: $optimal_delay"
                 echo "$current_turn_id,$optimal_delay" >> "$output_file"
             fi
             
@@ -522,8 +463,6 @@ parse_optimal_delays_to_file() {
             current_turn_id="${BASH_REMATCH[1]}"
             min_rms=999999
             optimal_delay=""
-            
-            echo "DEBUG: parse_optimal_delays_to_file - 开始新转弯段 ID=$current_turn_id"
             
         # 解析数据行
         elif [[ -n "$current_turn_id" && ! "$line" =~ ^# && -n "$line" ]]; then
@@ -538,34 +477,188 @@ parse_optimal_delays_to_file() {
                 gps_offset=$(echo "$gps_offset" | xargs)
                 rms_value=$(echo "$rms_value" | xargs)
                 
-                echo "DEBUG: parse_optimal_delays_to_file - 第${line_count}行数据: offset=$gps_offset, rms=$rms_value"
-                
                 # 验证数值格式
                 if [[ "$gps_offset" =~ ^-?[0-9]+\.?[0-9]*$ && "$rms_value" =~ ^[0-9]+\.?[0-9]*$ ]]; then
                     # 使用awk进行浮点数比较
                     local is_better=$(awk -v rms="$rms_value" -v min="$min_rms" 'BEGIN {print (rms < min) ? 1 : 0}')
                     
                     if [[ "$is_better" == "1" ]]; then
-                        echo "DEBUG: parse_optimal_delays_to_file - 发现更优值: $rms_value < $min_rms"
                         min_rms="$rms_value"
                         optimal_delay="$gps_offset"
                     fi
-                else
-                    echo "DEBUG: parse_optimal_delays_to_file - 数据格式无效: offset='$gps_offset', rms='$rms_value'"
                 fi
-            else
-                echo "DEBUG: parse_optimal_delays_to_file - 字段数不够: ${#fields[@]} < 2"
             fi
         fi
     done < "$analysis_file"
     
     # 保存最后一个转弯段的结果
     if [[ -n "$current_turn_id" && -n "$optimal_delay" ]]; then
-        echo "DEBUG: parse_optimal_delays_to_file - 保存最后转弯段 $current_turn_id，最优延迟: $optimal_delay"
         echo "$current_turn_id,$optimal_delay" >> "$output_file"
     fi
+}
+
+# 生成转弯段优化汇总表
+generate_turn_summary_table() {
+    local summary_file="$RESULTS_DIR/turn_optimization_summary.txt"
     
-    echo "DEBUG: parse_optimal_delays_to_file - 解析完成，总行数: $line_count"
+    log_info "生成转弯段优化汇总表..."
+    
+    # 创建表头
+    echo "日志名称,转弯段ID,位置RMS最优,横向RMS最优" > "$summary_file"
+    
+    local total_entries=0
+    
+    # 遍历所有vdr_*目录
+    for log_dir in "$RESULTS_DIR"/vdr_*/; do
+        if [[ -d "$log_dir" ]]; then
+            local log_name=$(basename "$log_dir")
+            local has_data=false
+            
+            # 检查转弯段分析文件
+            local pos_file="$log_dir/turn_rms_analysis_turns.txt"
+            local lateral_file="$log_dir/turn_lateral_analysis_turns.txt"
+            
+            if [[ ! -f "$pos_file" ]] && [[ ! -f "$lateral_file" ]]; then
+                continue
+            fi
+            
+            # 解析位置RMS数据
+            local -A pos_optimal_delays
+            local -A pos_optimal_rms
+            local -A pos_zero_rms
+            
+            if [[ -f "$pos_file" ]]; then
+                parse_turn_rms_data "$pos_file" pos_optimal_delays pos_optimal_rms pos_zero_rms
+            fi
+            
+            # 解析横向残差RMS数据
+            local -A lateral_optimal_delays
+            local -A lateral_optimal_rms
+            local -A lateral_zero_rms
+            
+            if [[ -f "$lateral_file" ]]; then
+                parse_turn_rms_data "$lateral_file" lateral_optimal_delays lateral_optimal_rms lateral_zero_rms
+            fi
+            
+            # 获取所有转弯段ID
+            local all_turn_ids=($(printf '%s\n' "${!pos_optimal_delays[@]}" "${!lateral_optimal_delays[@]}" | sort -nu))
+            
+            # 为每个转弯段生成汇总行
+            for turn_id in "${all_turn_ids[@]}"; do
+                if [[ -n "$turn_id" && "$turn_id" != "0" ]]; then  # 跳过整段轨迹(ID=0)
+                    local pos_result="N/A"
+                    local lateral_result="N/A"
+                    
+                    # 处理位置RMS结果
+                    if [[ -n "${pos_optimal_delays[$turn_id]}" ]]; then
+                        local pos_improvement=0
+                        if [[ -n "${pos_zero_rms[$turn_id]}" && -n "${pos_optimal_rms[$turn_id]}" ]]; then
+                            pos_improvement=$(awk -v zero="${pos_zero_rms[$turn_id]}" -v opt="${pos_optimal_rms[$turn_id]}" 'BEGIN {printf "%.4f", zero - opt}')
+                        fi
+                        local pos_improvement_cm=$(awk -v imp="$pos_improvement" 'BEGIN {printf "%.0f", imp * 100}')
+                        pos_result="${pos_improvement_cm}cm(${pos_optimal_delays[$turn_id]}s)"
+                    fi
+                    
+                    # 处理横向残差RMS结果
+                    if [[ -n "${lateral_optimal_delays[$turn_id]}" ]]; then
+                        local lateral_improvement=0
+                        if [[ -n "${lateral_zero_rms[$turn_id]}" && -n "${lateral_optimal_rms[$turn_id]}" ]]; then
+                            lateral_improvement=$(awk -v zero="${lateral_zero_rms[$turn_id]}" -v opt="${lateral_optimal_rms[$turn_id]}" 'BEGIN {printf "%.4f", zero - opt}')
+                        fi
+                        local lateral_improvement_cm=$(awk -v imp="$lateral_improvement" 'BEGIN {printf "%.0f", imp * 100}')
+                        lateral_result="${lateral_improvement_cm}cm(${lateral_optimal_delays[$turn_id]}s)"
+                    fi
+                    
+                    echo "$log_name,$turn_id,$pos_result,$lateral_result" >> "$summary_file"
+                    total_entries=$((total_entries + 1))
+                    has_data=true
+                fi
+            done
+            
+            # 在每个日志处理完后添加空行分隔
+            if [[ "$has_data" == true ]]; then
+                echo "" >> "$summary_file"
+            fi
+        fi
+    done
+    
+    log_success "转弯段优化汇总表已生成: $summary_file ($total_entries 条记录)"
+}
+
+# 解析转弯段RMS数据的辅助函数
+parse_turn_rms_data() {
+    local analysis_file="$1"
+    local -n optimal_delays_ref=$2
+    local -n optimal_rms_ref=$3
+    local -n zero_rms_ref=$4
+    
+    if [[ ! -f "$analysis_file" ]]; then
+        return
+    fi
+    
+    local current_turn_id=""
+    local min_rms=999999
+    local optimal_delay=""
+    local optimal_rms_val=""
+    local zero_rms_val=""
+    
+    while IFS= read -r line; do
+        line=$(echo "$line" | xargs)  # 去除前后空格
+        
+        # 解析转弯段标题
+        if [[ "$line" =~ ^#\ 转弯段\ ([0-9]+)\ \((.+)\)$ ]]; then
+            # 保存上一个转弯段的结果
+            if [[ -n "$current_turn_id" && -n "$optimal_delay" ]]; then
+                optimal_delays_ref[$current_turn_id]="$optimal_delay"
+                optimal_rms_ref[$current_turn_id]="$optimal_rms_val"
+                if [[ -n "$zero_rms_val" ]]; then
+                    zero_rms_ref[$current_turn_id]="$zero_rms_val"
+                fi
+            fi
+            
+            # 开始新的转弯段
+            current_turn_id="${BASH_REMATCH[1]}"
+            min_rms=999999
+            optimal_delay=""
+            optimal_rms_val=""
+            zero_rms_val=""
+            
+        # 解析数据行 - 修复：数据是空格分隔，不是逗号分隔
+        elif [[ -n "$current_turn_id" && ! "$line" =~ ^# && -n "$line" ]]; then
+            # 使用空格分隔字段
+            local fields=($line)
+            
+            if [[ ${#fields[@]} -ge 2 ]]; then
+                local gps_offset="${fields[0]}"
+                local rms_value="${fields[1]}"
+                
+                # 验证数值格式
+                if [[ "$gps_offset" =~ ^-?[0-9]+\.?[0-9]*$ && "$rms_value" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                    # 记录0.0延迟的RMS值
+                    if [[ $(awk -v offset="$gps_offset" 'BEGIN {print (offset == 0.0) ? 1 : 0}') == "1" ]]; then
+                        zero_rms_val="$rms_value"
+                    fi
+                    
+                    # 查找最优延迟
+                    local is_better=$(awk -v rms="$rms_value" -v min="$min_rms" 'BEGIN {print (rms < min) ? 1 : 0}')
+                    if [[ "$is_better" == "1" ]]; then
+                        min_rms="$rms_value"
+                        optimal_delay="$gps_offset"
+                        optimal_rms_val="$rms_value"
+                    fi
+                fi
+            fi
+        fi
+    done < "$analysis_file"
+    
+    # 保存最后一个转弯段的结果
+    if [[ -n "$current_turn_id" && -n "$optimal_delay" ]]; then
+        optimal_delays_ref[$current_turn_id]="$optimal_delay"
+        optimal_rms_ref[$current_turn_id]="$optimal_rms_val"
+        if [[ -n "$zero_rms_val" ]]; then
+            zero_rms_ref[$current_turn_id]="$zero_rms_val"
+        fi
+    fi
 }
 
 # 生成分析汇总报告
@@ -821,7 +914,34 @@ main() {
     check_prerequisites
     run_batch_analysis
     generate_optimal_delays_summary
+    generate_turn_summary_table
     generate_analysis_summary
+    
+    # 生成轨迹对比图
+    log_info "生成轨迹对比图..."
+    local script_dir=$(dirname "$0")
+    if [[ -f "$script_dir/plot_trajectory_comparison.py" ]]; then
+        if python3 "$script_dir/plot_trajectory_comparison.py" --input "$RESULTS_DIR" >/dev/null 2>&1; then
+            log_success "轨迹对比图生成完成"
+        else
+            log_warning "轨迹对比图生成失败"
+        fi
+    else
+        log_warning "找不到轨迹绘制脚本"
+    fi
+    
+    # 生成转弯段优化汇总表
+    log_info "生成转弯段优化汇总表..."
+    if [[ -f "$script_dir/generate_turn_summary_final.py" ]]; then
+        if python3 "$script_dir/generate_turn_summary_final.py" "$RESULTS_DIR" >/dev/null 2>&1; then
+            log_success "转弯段优化汇总表生成完成"
+        else
+            log_warning "转弯段优化汇总表生成失败"
+        fi
+    else
+        log_warning "找不到转弯段汇总脚本"
+    fi
+    
     show_final_summary
 }
 

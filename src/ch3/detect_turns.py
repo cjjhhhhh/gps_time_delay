@@ -68,27 +68,38 @@ class TurnDetector:
         gps_data = {}  # 时间秒 -> (时间戳, 时间字符串)
         nzz_data = {}  # 时间秒 -> 航向角
         
-        try:
-            with open(log_file, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    
-                    try:
-                        if line.startswith('$GPS'):
-                            self._parse_gps_line(line, gps_data)
-                        elif line.startswith('$NZZ'):
-                            self._parse_nzz_line(line, nzz_data)
-                    
-                    except (ValueError, IndexError) as e:
-                        print(f"警告: 第{line_num}行数据解析失败: {e}")
-                        continue
+        # 尝试不同的编码格式
+        encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp1252']
         
-        except FileNotFoundError:
-            print(f"错误: 文件不存在 {log_file}")
-            return []
-        except Exception as e:
-            print(f"错误: 读取文件失败 {e}")
-            return []
+        for encoding in encodings:
+            try:
+                with open(log_file, 'r', encoding=encoding) as f:
+                    print(f"使用编码: {encoding}")
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        
+                        try:
+                            if line.startswith('$GPS'):
+                                self._parse_gps_line(line, gps_data)
+                            elif line.startswith('$NZZ'):
+                                self._parse_nzz_line(line, nzz_data)
+                        
+                        except (ValueError, IndexError) as e:
+                            print(f"警告: 第{line_num}行数据解析失败: {e}")
+                            continue
+                break  # 成功读取，跳出循环
+                
+            except UnicodeDecodeError:
+                if encoding == encodings[-1]:  # 最后一个编码也失败
+                    print(f"错误: 无法用任何编码读取文件 {log_file}")
+                    return []
+                continue  # 尝试下一个编码
+            except FileNotFoundError:
+                print(f"错误: 文件不存在 {log_file}")
+                return []
+            except Exception as e:
+                print(f"错误: 读取文件失败 {e}")
+                return []
         
         # 匹配GPS和NZZ数据
         matched_data = self._match_gps_nzz_data(gps_data, nzz_data)
@@ -199,7 +210,6 @@ class TurnDetector:
             pass
         
         return time_key
-    
     def normalize_heading_diff(self, h1: float, h2: float) -> float:
         """
         处理航向角360度跳变问题
